@@ -795,7 +795,7 @@ namespace microcodex {
             (!config_.account_id.empty() && !headers.append("ChatGPT-Account-ID: " + config_.account_id)) ||
             !headers.append("Content-Type: application/json") ||
             !headers.append("Accept: text/event-stream") ||
-            !headers.append("originator: microcodex") ||
+            !headers.append("originator: codex_cli_rs") ||
             !headers.append("session-id: " + session_id_) ||
             !headers.append("thread-id: " + session_id_) ||
             !headers.append("x-client-request-id: " + session_id_) ||
