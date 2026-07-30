@@ -4,6 +4,7 @@
 #pragma once
 
 #include <expected>
+#include <stop_token>
 #include <string>
 
 namespace microcodex {
@@ -14,6 +15,7 @@ namespace microcodex {
         int error_code;
     };
 
-    std::expected<microcodex::BashCommandResult, std::string> bash(const std::string& cmd);
+    std::expected<BashCommandResult, std::string> bash(const std::string &cmd);
+    std::expected<BashCommandResult, std::string> bash(const std::string &cmd, std::stop_token stop_token);
 
 } // namespace microcodex

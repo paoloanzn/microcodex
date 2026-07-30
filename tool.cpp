@@ -9,15 +9,13 @@
 
 namespace microcodex {
 
-    std::expected<std::string, std::string>
-    ToolArguments::string(const std::string_view name) const {
+    std::expected<std::string, std::string> ToolArguments::string(const std::string_view name) const {
         auto value = json::scalarMember(json_, name);
         if (!value) return std::unexpected(value.error());
         return json::string(*value);
     }
 
-    std::expected<std::size_t, std::string>
-    ToolArguments::size(const std::string_view name) const {
+    std::expected<std::size_t, std::string> ToolArguments::size(const std::string_view name) const {
         auto value = json::scalarMember(json_, name);
         if (!value) return std::unexpected(value.error());
         std::size_t result = 0;
@@ -28,8 +26,7 @@ namespace microcodex {
         return result;
     }
 
-    std::expected<bool, std::string>
-    ToolArguments::boolean(const std::string_view name) const {
+    std::expected<bool, std::string> ToolArguments::boolean(const std::string_view name) const {
         auto value = json::scalarMember(json_, name);
         if (!value) return std::unexpected(value.error());
         if (*value == "true") return true;
@@ -41,8 +38,7 @@ namespace microcodex {
 
 namespace microcodex::detail {
 
-    std::string toolJsonString(const std::string_view name, const std::string_view description,
-                               const std::string_view parameters) {
+    std::string toolJsonString(const std::string_view name, const std::string_view description, const std::string_view parameters) {
         std::string json = R"({"type":"function","name":)";
         microcodex::json::appendString(json, name);
         json += R"(,"description":)";

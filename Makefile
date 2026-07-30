@@ -3,9 +3,9 @@ CC  := clang
 
 SDKROOT := $(shell xcrun --sdk macosx --show-sdk-path)
 
-CXXFLAGS := -std=c++23 -O2 -Wall -Wextra -isysroot $(SDKROOT)
+CXXFLAGS := -std=c++23 -O2 -Wall -Wextra -pthread -isysroot $(SDKROOT)
 CFLAGS   := -std=c17 -Wall -Wextra -isysroot $(SDKROOT)
-LDFLAGS  := -isysroot $(SDKROOT)
+LDFLAGS  := -pthread -isysroot $(SDKROOT)
 LDLIBS   := -lcurl
 
 TARGET := build/app

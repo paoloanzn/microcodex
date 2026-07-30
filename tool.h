@@ -3,9 +3,10 @@
 
 #pragma once
 
-#include <expected>
 #include <cstddef>
+#include <expected>
 #include <functional>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -30,13 +31,11 @@ namespace microcodex {
 
         virtual std::string_view name() const = 0;
         virtual std::string toJsonString() const = 0;
-        virtual std::expected<std::string, std::string>
-        executeJson(std::string_view arguments) const = 0;
+        virtual std::expected<std::string, std::string> executeJson(std::string_view arguments, std::stop_token stop_token = {}) const = 0;
     };
 
     namespace detail {
-        std::string toolJsonString(std::string_view name, std::string_view description,
-                                   std::string_view parameters);
+        std::string toolJsonString(std::string_view name, std::string_view description, std::string_view parameters);
     }
 
     // Example for `std::expected<int, std::string> write(const std::string &, std::string_view)`.
@@ -44,11 +43,12 @@ namespace microcodex {
     // Tool<std::expected<int, std::string>, const std::string &, std::string_view> writeTool{
     //     "write", "Write content to a new file.", write,
     //     R"({"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"],"additionalProperties":false})",
-    //     [](auto callable, const ToolArguments &arguments) -> std::expected<std::string, std::string> {
+    //     [](auto callable, const ToolArguments &arguments, std::stop_token stop_token) -> std::expected<std::string, std::string> {
     //         auto path = arguments.string("path");
     //         auto content = arguments.string("content");
     //         if (!path) return std::unexpected(path.error());
     //         if (!content) return std::unexpected(content.error());
+    //         if (stop_token.stop_requested()) return std::unexpected("Tool execution interrupted");
     //         auto result = callable(*path, *content);
     //         if (!result) return std::unexpected(result.error());
     //         return std::to_string(*result);
@@ -56,15 +56,11 @@ namespace microcodex {
     template <typename T, typename ... S>
     class Tool final : public ToolBase {
         public:
-            // The adapter maps named JSON fields to the callable and serializes its result.
-            using JsonExecutionAdapter = std::function<std::expected<std::string, std::string>(
-                T (*callable)(S...), const ToolArguments &arguments)>;
+            // The adapter maps named JSON fields to the callable, observes
+            // cancellation when useful, and serializes the callable's result.
+            using JsonExecutionAdapter = std::function<std::expected<std::string, std::string>(T (*callable)(S...), const ToolArguments &arguments, std::stop_token stop_token)>;
 
-            explicit Tool(
-                std::string name, std::string description, T (*callable)(S...),
-                std::string parameters =
-                    R"({"type":"object","properties":{},"required":[],"additionalProperties":false})",
-                JsonExecutionAdapter adapter = {})
+            explicit Tool(std::string name, std::string description, T (*callable)(S...), std::string parameters = R"({"type":"object","properties":{},"required":[],"additionalProperties":false})", JsonExecutionAdapter adapter = {})
                 : name_{std::move(name)}, description_{std::move(description)},
                   callable_(callable), parameters_{std::move(parameters)}, adapter_{std::move(adapter)} {}
 
@@ -79,18 +75,25 @@ namespace microcodex {
                 return detail::toolJsonString(name_, description_, parameters_);
             }
 
-            std::expected<std::string, std::string>
-            executeJson(const std::string_view arguments) const override {
+            std::expected<std::string, std::string> executeJson(const std::string_view arguments, const std::stop_token stop_token = {}) const override {
                 if (!adapter_) {
                     return std::unexpected("Tool '" + name_ + "' has no JSON execution adapter");
                 }
-                return adapter_(callable_, ToolArguments{arguments});
+                if (stop_token.stop_requested()) {
+                    return std::unexpected("Tool execution interrupted");
+                }
+
+                auto result = adapter_(callable_, ToolArguments{arguments}, stop_token);
+                if (stop_token.stop_requested()) {
+                    return std::unexpected("Tool execution interrupted");
+                }
+                return result;
             }
 
         private:
             std::string name_;
             std::string description_;
-            T (*callable_)(S...); 
+            T (*callable_)(S...);
             std::string parameters_;
             JsonExecutionAdapter adapter_;
     };
