@@ -33,6 +33,7 @@ namespace microcodex {
         std::expected<std::string, std::string> string(std::string_view name) const;
         std::expected<std::size_t, std::string> size(std::string_view name) const;
         std::expected<bool, std::string> boolean(std::string_view name) const;
+        std::expected<bool, std::string> boolean(std::string_view name, bool default_value) const;
 
     private:
         std::string_view json_;

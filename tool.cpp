@@ -34,6 +34,15 @@ namespace microcodex {
         return std::unexpected("JSON member '" + std::string(name) + "' is not a boolean");
     }
 
+    std::expected<bool, std::string> ToolArguments::boolean(const std::string_view name, const bool default_value) const {
+        auto value = json::findJsonMember(json_, name);
+        if (!value) return std::unexpected(value.error());
+        if (!*value) return default_value;
+        if (**value == "true") return true;
+        if (**value == "false") return false;
+        return std::unexpected("JSON member '" + std::string(name) + "' is not a boolean");
+    }
+
 } // namespace microcodex
 
 namespace microcodex::detail {

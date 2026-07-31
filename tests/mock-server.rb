@@ -265,7 +265,7 @@ end
 
 def edit_call_response
   arguments = JSON.generate(path: "edit-target.txt", old_content: "line two",
-                            new_content: "line two changed", replace_all: false)
+                            new_content: "line two changed")
   sse(
     {type: "response.output_item.done",
      item: {type: "function_call", call_id: "call_edit", name: "edit",

@@ -22,13 +22,13 @@ STDERR
 
 printf 'line one\nline two\nline three\n' > "$TEST_PROJECT/edit-target.txt"
 
-expect_process "T3.3: an edit tool call returns its compact model output" 0 \
+expect_process "T3.3: edit defaults replace_all to false when omitted" 0 \
     run_with_mock tool-edit env CODEX_HOME="$tool_home" PATH="$TEST_BIN_DIR:$PATH" \
         microcodex Edit the requested file <<'STDOUT' 3<<'STDERR'
 Edited edit-target.txt
 STDOUT
 
-[tool edit] {"path":"edit-target.txt","old_content":"line two","new_content":"line two changed","replace_all":false}
+[tool edit] {"path":"edit-target.txt","old_content":"line two","new_content":"line two changed"}
 [tool edit completed] Edited edit-target.txt
 STDERR
 

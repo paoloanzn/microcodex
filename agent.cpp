@@ -56,7 +56,7 @@ namespace {
         auto path = arguments.string("path");
         auto old_content = arguments.string("old_content");
         auto new_content = arguments.string("new_content");
-        auto replace_all = arguments.boolean("replace_all");
+        auto replace_all = arguments.boolean("replace_all", false);
         if (!path || !old_content || !new_content || !replace_all) {
             if (!path) return std::unexpected(path.error());
             if (!old_content) return std::unexpected(old_content.error());
@@ -128,8 +128,8 @@ namespace microcodex {
             R"({"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"],"additionalProperties":false})",
             executeWrite));
         tools.emplace_back(std::make_shared<EditTool>(
-            "edit", "Replace exact text in an existing file. Set replace_all to false when the old text must occur only once.", edit,
-            R"({"type":"object","properties":{"path":{"type":"string"},"old_content":{"type":"string"},"new_content":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["path","old_content","new_content","replace_all"],"additionalProperties":false})",
+            "edit", "Replace exact text in an existing file. replace_all defaults to false when omitted.", edit,
+            R"({"type":"object","properties":{"path":{"type":"string"},"old_content":{"type":"string"},"new_content":{"type":"string"},"replace_all":{"type":"boolean","default":false}},"required":["path","old_content","new_content"],"additionalProperties":false})",
             executeEdit));
         tools.emplace_back(std::make_shared<GlobTool>(
             "glob", "Expand a filesystem glob pattern and return matching paths separated by newlines.", glob,
