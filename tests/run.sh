@@ -5,7 +5,7 @@ set -u
 script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd) || exit 1
 ROOT_DIR=$(CDPATH= cd "$script_dir/.." && pwd) || exit 1
 TEST_DIR=$script_dir
-APP=$ROOT_DIR/build/app
+APP=$ROOT_DIR/build/microcodex
 MOCK_SERVER=$ROOT_DIR/tests/mock-server.rb
 RUBY=${RUBY:-ruby}
 
