@@ -443,6 +443,64 @@ namespace {
         return next;
     }
 
+    bool isWordCodepoint(const std::uint32_t codepoint) {
+        return (codepoint >= 'a' && codepoint <= 'z') ||
+               (codepoint >= 'A' && codepoint <= 'Z') ||
+               (codepoint >= '0' && codepoint <= '9') ||
+               codepoint == '_' || codepoint >= 0x80;
+    }
+
+    bool isWordAt(const std::string_view text, const std::size_t offset) {
+        return offset < text.size() && isWordCodepoint(decodeCodepoint(text, offset).first);
+    }
+
+    std::size_t previousWord(const std::string_view text, std::size_t offset) {
+        while (offset > 0) {
+            const std::size_t previous = previousUtf8(text, offset);
+            if (isWordAt(text, previous)) {
+                break;
+            }
+            offset = previous;
+        }
+        while (offset > 0) {
+            const std::size_t previous = previousUtf8(text, offset);
+            if (!isWordAt(text, previous)) {
+                break;
+            }
+            offset = previous;
+        }
+        return offset;
+    }
+
+    std::size_t nextWord(const std::string_view text, std::size_t offset) {
+        if (isWordAt(text, offset)) {
+            while (offset < text.size() && isWordAt(text, offset)) {
+                offset = nextUtf8(text, offset);
+            }
+            return offset;
+        }
+        while (offset < text.size() && !isWordAt(text, offset)) {
+            offset = nextUtf8(text, offset);
+        }
+        while (offset < text.size() && isWordAt(text, offset)) {
+            offset = nextUtf8(text, offset);
+        }
+        return offset;
+    }
+
+    std::size_t lineStart(const std::string_view text, const std::size_t offset) {
+        if (offset == 0) {
+            return 0;
+        }
+        const std::size_t newline = text.rfind('\n', offset - 1);
+        return newline == std::string_view::npos ? 0 : newline + 1;
+    }
+
+    std::size_t lineEnd(const std::string_view text, const std::size_t offset) {
+        const std::size_t newline = text.find('\n', offset);
+        return newline == std::string_view::npos ? text.size() : newline;
+    }
+
     void insertCodepoint(UiState &state, const std::uint32_t codepoint) {
         char utf8[7]{};
         const int length = tb_utf8_unicode_to_char(utf8, codepoint);
@@ -1123,6 +1181,28 @@ namespace {
             state.quitting = true;
             return;
         }
+        if (event.key == TB_KEY_CTRL_A) {
+            state.input_cursor = lineStart(state.input, state.input_cursor);
+            state.dirty = true;
+            return;
+        }
+        if (event.key == TB_KEY_CTRL_E) {
+            state.input_cursor = lineEnd(state.input, state.input_cursor);
+            state.dirty = true;
+            return;
+        }
+        if ((event.mod & TB_MOD_ALT) != 0 && (event.ch == 'b' || event.ch == 'B')) {
+            // Many terminals encode option-left as escape followed by "b".
+            state.input_cursor = previousWord(state.input, state.input_cursor);
+            state.dirty = true;
+            return;
+        }
+        if ((event.mod & TB_MOD_ALT) != 0 && (event.ch == 'f' || event.ch == 'F')) {
+            // Likewise, option-right is commonly sent as meta-f.
+            state.input_cursor = nextWord(state.input, state.input_cursor);
+            state.dirty = true;
+            return;
+        }
         if (event.key == TB_KEY_CTRL_C) {
             if (turn.valid()) {
                 api.interrupt();
@@ -1186,12 +1266,26 @@ namespace {
             return;
         }
         if (event.key == TB_KEY_ARROW_LEFT) {
-            state.input_cursor = previousUtf8(state.input, state.input_cursor);
+            state.input_cursor = (event.mod & (TB_MOD_ALT | TB_MOD_CTRL)) != 0
+                                     ? previousWord(state.input, state.input_cursor)
+                                     : previousUtf8(state.input, state.input_cursor);
             state.dirty = true;
             return;
         }
         if (event.key == TB_KEY_ARROW_RIGHT) {
-            state.input_cursor = nextUtf8(state.input, state.input_cursor);
+            state.input_cursor = (event.mod & (TB_MOD_ALT | TB_MOD_CTRL)) != 0
+                                     ? nextWord(state.input, state.input_cursor)
+                                     : nextUtf8(state.input, state.input_cursor);
+            state.dirty = true;
+            return;
+        }
+        if ((event.mod & TB_MOD_ALT) != 0 && event.key == TB_KEY_ARROW_UP) {
+            state.input_cursor = lineStart(state.input, state.input_cursor);
+            state.dirty = true;
+            return;
+        }
+        if ((event.mod & TB_MOD_ALT) != 0 && event.key == TB_KEY_ARROW_DOWN) {
+            state.input_cursor = lineEnd(state.input, state.input_cursor);
             state.dirty = true;
             return;
         }
