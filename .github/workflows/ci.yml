@@ -22,7 +22,7 @@ jobs:
       matrix:
         include:
           - name: macOS
-            os: macos-15
+            os: macos-26
           - name: Linux
             os: ubuntu-24.04
 
