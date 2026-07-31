@@ -3,6 +3,8 @@
 
 #include "styled-text.h"
 #include "markdown.h"
+#include "shell-highlight.h"
+#include "tool.h"
 #include "ui.h"
 
 #include <algorithm>
@@ -15,6 +17,7 @@
 #include <future>
 #include <initializer_list>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -28,8 +31,10 @@ namespace {
     using microcodex::ui::decodeCodepoint;
     using microcodex::ui::lineWithPrefix;
     using microcodex::ui::renderMarkdown;
+    using microcodex::ui::highlightShell;
     using microcodex::ui::textWidth;
     using microcodex::ui::wrapStyledText;
+    using microcodex::ui::wrapStyledSpans;
 
     constexpr std::size_t maximum_transcript_bytes = 512 * 1024;
     constexpr std::size_t maximum_tool_preview_bytes = 16 * 1024;
@@ -448,20 +453,39 @@ namespace {
         return entry.title + '(' + entry.text + ')';
     }
 
+    std::optional<std::string> bashCommand(const UiEntry &entry) {
+        if (entry.title != "bash") {
+            return std::nullopt;
+        }
+        auto command = microcodex::ToolArguments(entry.text).string("command");
+        if (!command) {
+            return std::nullopt;
+        }
+        return std::move(*command);
+    }
+
     void appendToolLines(std::vector<StyledLine> &lines, const UiEntry &entry,
                          const int width) {
         const uintattr_t bullet_color = !entry.finished
                                             ? muted_foreground
                                             : (entry.succeeded ? success_foreground
                                                                : error_foreground);
-        const std::string_view verb = entry.finished ? "Called " : "Running ";
+        const std::optional<std::string> command = bashCommand(entry);
+        const std::string_view verb = entry.finished && command ? "Ran "
+                                      : entry.finished           ? "Called "
+                                                                 : "Running ";
         const StyledLine header = lineWithPrefix({
             {"• ", static_cast<uintattr_t>(bullet_color | TB_BOLD)},
             {std::string(verb), TB_DEFAULT | TB_BOLD},
         });
         const StyledLine continuation = lineWithPrefix({{"  │ ", faint_foreground}});
-        appendLines(lines, wrapStyledText(toolInvocation(entry), width, header,
-                                          continuation));
+        if (command) {
+            const std::vector<StyledSpan> highlighted = highlightShell(*command);
+            appendLines(lines, wrapStyledSpans(highlighted, width, header, continuation));
+        } else {
+            appendLines(lines, wrapStyledText(toolInvocation(entry), width, header,
+                                              continuation));
+        }
 
         if (!entry.finished) {
             return;

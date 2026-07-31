@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "../markdown.h"
+#include "../shell-highlight.h"
 
 #include <iostream>
 #include <string>
@@ -13,6 +14,7 @@ namespace {
     using microcodex::ui::StyledLine;
     using microcodex::ui::StyledSpan;
     using microcodex::ui::renderMarkdown;
+    using microcodex::ui::highlightShell;
     using microcodex::ui::textWidth;
 
     int failures = 0;
@@ -55,6 +57,26 @@ namespace {
             }
         }
         return false;
+    }
+
+    bool hasForegroundText(const std::vector<StyledSpan> &spans,
+                           const std::string_view text,
+                           const uintattr_t foreground) {
+        for (const StyledSpan &span : spans) {
+            if (span.text.find(text) != std::string::npos &&
+                (span.foreground & 0x00ff) == foreground) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    std::string spanText(const std::vector<StyledSpan> &spans) {
+        std::string text;
+        for (const StyledSpan &span : spans) {
+            text += span.text;
+        }
+        return text;
     }
 
     void testInlineMarkdown() {
@@ -122,6 +144,39 @@ namespace {
         }
     }
 
+    void testShellHighlighting() {
+        const std::string source =
+            "FOO=bar echo \"$FOO\" --flag | grep value # explanation";
+        const std::vector<StyledSpan> spans = highlightShell(source);
+
+        require(spanText(spans) == source,
+                "shell highlighting preserves the command exactly");
+        require(hasForegroundText(spans, "FOO=bar", 14),
+                "shell assignment is styled as a variable");
+        require(hasStyledText({StyledLine{.spans = spans}}, "echo", TB_BOLD),
+                "shell executable is bold");
+        require(hasForegroundText(spans, "\"$FOO\"", 10),
+                "quoted shell string uses the string color");
+        require(hasForegroundText(spans, "--flag", 12),
+                "shell option uses the option color");
+        require(hasForegroundText(spans, "|", 13),
+                "shell operator uses the operator color");
+        require(hasStyledText({StyledLine{.spans = spans}}, "grep", TB_BOLD),
+                "command after a pipe is recognized");
+        require(hasStyledText({StyledLine{.spans = spans}}, "# explanation", TB_DIM),
+                "shell comment is dimmed");
+
+        const std::string incomplete = "echo 'unfinished";
+        require(spanText(highlightShell(incomplete)) == incomplete,
+                "incomplete shell quote remains visible");
+    }
+
+    void testShellCodeFence() {
+        const auto lines = renderMarkdown("```bash\necho --version\n```", 40);
+        require(hasStyledText(lines, "echo", TB_BOLD),
+                "bash code fence uses shell highlighting");
+    }
+
 } // namespace
 
 int main() {
@@ -130,6 +185,8 @@ int main() {
     testCodeBlock();
     testTables();
     testWidthLimit();
+    testShellHighlighting();
+    testShellCodeFence();
 
     if (failures != 0) {
         std::cerr << failures << " render test(s) failed\n";

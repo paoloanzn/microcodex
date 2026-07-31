@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "markdown.h"
+#include "shell-highlight.h"
 
 #include "vendor/md4c/src/md4c.h"
 
@@ -19,6 +20,7 @@ namespace {
     using microcodex::ui::StyledSpan;
     using microcodex::ui::appendSpan;
     using microcodex::ui::lineWithPrefix;
+    using microcodex::ui::highlightShell;
     using microcodex::ui::textWidth;
     using microcodex::ui::wrapStyledSpans;
     using microcodex::ui::wrapStyledText;
@@ -71,6 +73,10 @@ namespace {
             return {};
         }
         return std::string(attribute.text, attribute.size);
+    }
+
+    bool isShellLanguage(const std::string_view language) {
+        return language == "bash" || language == "sh" || language == "shell";
     }
 
     struct ListState {
@@ -483,9 +489,14 @@ namespace {
 
             StyledLine first = lineWithPrefix({{"  ", muted_color}}, code_background, true);
             StyledLine continuation = first;
-            const StyledSpan code_span{code_, code_color};
-            appendLines(lines_, wrapStyledSpans(
-                std::span<const StyledSpan>(&code_span, 1), width_, first, continuation));
+            if (isShellLanguage(code_language_)) {
+                const std::vector<StyledSpan> highlighted = highlightShell(code_);
+                appendLines(lines_, wrapStyledSpans(highlighted, width_, first, continuation));
+            } else {
+                const StyledSpan code_span{code_, code_color};
+                appendLines(lines_, wrapStyledSpans(
+                    std::span<const StyledSpan>(&code_span, 1), width_, first, continuation));
+            }
         }
 
         void finishTableCell() {
