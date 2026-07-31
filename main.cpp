@@ -3,6 +3,7 @@
 
 #include "agent.h"
 #include "conversation.h"
+#include "model-catalog.h"
 #include "oauth.h"
 #include "response-item.h"
 #include "ui.h"
@@ -253,10 +254,19 @@ namespace {
 
     std::expected<void, std::string> applyConversationEnvironment(microcodex::CodexApiConfig &config) {
         auto compact_at = applySizeEnvironment("MICROCODEX_COMPACT_AT_TOKENS",
-                                               config.compact_at_tokens);
+                                               config.compaction.compact_at_tokens);
         if (!compact_at) return compact_at;
         return applySizeEnvironment("MICROCODEX_RETAINED_CONTEXT_TOKENS",
-                                    config.retained_context_tokens);
+                                    config.compaction.retained_context_tokens);
+    }
+
+    std::expected<void, std::string> applyModelContextLimits(microcodex::CodexApiConfig &config) {
+        auto models = microcodex::fetchModelContextLimits(config.endpoint, config.access_token, config.account_id);
+        if (!models) return std::unexpected(models.error());
+        const microcodex::ModelContextLimits *model = microcodex::findModelContextLimits(*models, config.model);
+        if (model == nullptr) return std::unexpected("Models API did not return metadata for '" + config.model + "'");
+        config.compaction = microcodex::compactionConfigForModel(*model, config.compaction.retained_context_tokens, config.compaction.maximum_summary_bytes);
+        return {};
     }
 
 } // namespace
@@ -325,11 +335,6 @@ int main(const int argc, char *argv[]) {
     }
 
     auto config = microcodex::makeCodingAgentConfig(std::move(request->model));
-    auto configured = applyConversationEnvironment(config);
-    if (!configured) {
-        std::cerr << configured.error() << '\n';
-        return 1;
-    }
     config.resume_conversation = std::move(resume_path);
     microcodex::applyOAuthCredentials(config, **credentials);
     // Keep transport selection at the executable boundary so black-box tests
@@ -338,6 +343,15 @@ int main(const int argc, char *argv[]) {
     if (const char *endpoint = std::getenv("MICROCODEX_API_ENDPOINT");
         endpoint != nullptr && endpoint[0] != '\0') {
         config.endpoint = endpoint;
+    }
+    auto model_context = applyModelContextLimits(config);
+    if (!model_context) {
+        std::cerr << "Warning: " << model_context.error() << ". Using built-in context limits.\n";
+    }
+    auto configured = applyConversationEnvironment(config);
+    if (!configured) {
+        std::cerr << configured.error() << '\n';
+        return 1;
     }
     if (request->prompt) {
         return runPrompt(std::move(config), *request->prompt);

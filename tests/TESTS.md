@@ -36,11 +36,12 @@ compares all three observable process results:
 - stdout, byte for byte;
 - stderr, byte for byte.
 
-The mock server also validates the outbound HTTP request before replying. Its
-scenarios cover streamed text, an HTTP error, and a complete two-request tool
-loop in which the model asks the real `write` tool to change the test working
-directory. This verifies the CLI, credential loading, request construction,
-SSE handling, tool execution, transcript replay, and final output together.
+The mock server also validates the authenticated model-catalog and Responses
+requests before replying. Its scenarios cover dynamic context limits, streamed
+text, an HTTP error, and a complete two-request tool loop in which the model
+asks the real `write` tool to change the test working directory. This verifies
+the CLI, credential loading, request construction, SSE handling, tool
+execution, transcript replay, and final output together.
 Conversation scenarios also cover durable JSONL turns, listing and walking
 saved history, exact replay after resume, compaction checkpoints, and the
 invariant that compaction never removes the durable transcript.

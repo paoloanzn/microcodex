@@ -30,20 +30,15 @@ namespace microcodex {
 
     } // namespace
 
-    ContextCompactor::ContextCompactor(CompactionConfig config)
-        : config_(std::move(config)) {
-        if (config_.context_limit_tokens != 0 && config_.compact_at_tokens == 0) {
-            config_.compact_at_tokens = config_.context_limit_tokens * 3 / 4;
-        }
-        if (config_.retained_context_tokens == 0) {
-            config_.retained_context_tokens = config_.compact_at_tokens / 5;
-        }
-    }
+    ContextCompactor::ContextCompactor(CompactionConfig config) : config_(std::move(config)) {}
 
     bool ContextCompactor::needed(const ContextUsage &usage) const {
         if (config_.compact_at_tokens == 0) return false;
+        const std::size_t threshold = config_.context_limit_tokens == 0
+                                          ? config_.compact_at_tokens
+                                          : std::min(config_.compact_at_tokens, config_.context_limit_tokens);
         return std::max(usage.reported_input_tokens, usage.estimated_tokens) >=
-               config_.compact_at_tokens;
+               threshold;
     }
 
     std::expected<CompactionPlan, std::string> ContextCompactor::plan(const ContextView &context, const bool retain_recent_turns) const {

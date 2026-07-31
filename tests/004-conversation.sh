@@ -69,7 +69,7 @@ compaction_id=$(basename "$1" .jsonl)
 
 expect_process "T4.7: resume compacts old turns before sending the new prompt" 0 \
     run_with_mock compaction-resume env CODEX_HOME="$compaction_home" \
-        MICROCODEX_COMPACT_AT_TOKENS=1 MICROCODEX_RETAINED_CONTEXT_TOKENS=1 \
+        MICROCODEX_RETAINED_CONTEXT_TOKENS=1 \
         PATH="$TEST_BIN_DIR:$PATH" microcodex resume "$compaction_id" \
         Continue after compaction <<'STDOUT' 3<<'STDERR'
 Continued from compacted state

@@ -25,13 +25,25 @@ def read_request(socket)
     name, value = line.split(":", 2)
     [name.downcase, value.strip] if value
   end.to_h
-  length = Integer(header_map.fetch("content-length"), 10)
+  length = Integer(header_map.fetch("content-length", "0"), 10)
   raise "request body is too large" if length > MAX_REQUEST_BYTES
 
   body = socket.read(length)
   raise "request body ended early" unless body&.bytesize == length
 
-  [request_line, header_map, body, JSON.parse(body)]
+  payload = body.empty? ? nil : JSON.parse(body)
+  [request_line, header_map, body, payload]
+end
+
+def validate_models_request!(request_line, headers)
+  assert(request_line == "GET /models?client_version=0.146.0 HTTP/1.1",
+         "request did not GET the models endpoint")
+  assert(headers["authorization"] == "Bearer test-access-token",
+         "models request did not send the isolated access token")
+  assert(headers["chatgpt-account-id"] == "test-account",
+         "models request did not send the account ID")
+  assert(headers["accept"] == "application/json",
+         "models request did not ask for JSON")
 end
 
 def validate_common!(request_line, headers, payload)
@@ -219,6 +231,26 @@ def response_for(scenario, request_number)
   end
 end
 
+def models_response(scenario)
+  test_model_context_window = scenario == "compaction-resume" ? 2 : 272_000
+  JSON.generate(models: [
+    {
+      slug: "gpt-5.6-sol",
+      context_window: 272_000,
+      max_context_window: 272_000,
+      effective_context_window_percent: 95,
+      auto_compact_token_limit: nil
+    },
+    {
+      slug: "test-model",
+      context_window: test_model_context_window,
+      max_context_window: test_model_context_window,
+      effective_context_window_percent: 95,
+      auto_compact_token_limit: nil
+    }
+  ])
+end
+
 def send_response(socket, status, reason, content_type, body)
   socket.write(
     "HTTP/1.1 #{status} #{reason}\r\n" \
@@ -241,18 +273,31 @@ expected_requests = if scenario == "context-error-retry"
 server = TCPServer.new("127.0.0.1", 0)
 File.write(port_file, "#{server.addr[1]}\n")
 
-expected_requests.times do |request_number|
+request_number = 0
+models_requested = false
+while request_number < expected_requests
   socket = nil
   begin
     Timeout.timeout(REQUEST_TIMEOUT) do
       socket = server.accept
       request_line, headers, body, payload = read_request(socket)
       FileUtils.mkdir_p(request_directory)
+      if request_line.start_with?("GET ")
+        assert(!models_requested, "models endpoint was queried more than once")
+        validate_models_request!(request_line, headers)
+        models_requested = true
+        File.binwrite(File.join(request_directory, "models-request.txt"),
+                      "#{request_line}\r\n#{headers.inspect}\r\n\r\n")
+        send_response(socket, 200, "OK", "application/json", models_response(scenario))
+        next
+      end
+
       File.binwrite(File.join(request_directory, "request-#{request_number + 1}.txt"),
                     "#{request_line}\r\n#{headers.inspect}\r\n\r\n#{body}")
       validate_common!(request_line, headers, payload)
       validate_scenario!(scenario, request_number, payload)
       send_response(socket, *response_for(scenario, request_number))
+      request_number += 1
     end
   rescue StandardError => error
     warn "mock server: #{error.message}"
@@ -263,3 +308,4 @@ expected_requests.times do |request_number|
     socket&.close
   end
 end
+assert(models_requested, "models endpoint was not queried")

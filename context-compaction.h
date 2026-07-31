@@ -16,16 +16,15 @@
 namespace microcodex {
 
     struct CompactionConfig {
-        // A zero limit disables automatic compaction.
-        std::size_t context_limit_tokens = 0;
-        std::size_t compact_at_tokens = 0;
-        std::size_t retained_context_tokens = 0;
-        std::size_t maximum_summary_bytes = 32 * 1024;
+        std::size_t context_limit_tokens;
+        std::size_t compact_at_tokens;
+        std::size_t retained_context_tokens;
+        std::size_t maximum_summary_bytes;
     };
 
     struct ContextUsage {
-        std::size_t reported_input_tokens = 0;
-        std::size_t estimated_tokens = 0;
+        std::size_t reported_input_tokens;
+        std::size_t estimated_tokens;
     };
 
     struct ContextView {

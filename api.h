@@ -35,9 +35,16 @@ namespace microcodex {
         std::size_t maximum_tool_rounds = 64;
         std::size_t maximum_parallel_tool_calls = 32;
         std::size_t maximum_tool_output_bytes = 64 * 1024;
-        std::size_t context_limit_tokens = 128 * 1024;
-        std::size_t compact_at_tokens = 96 * 1024;
-        std::size_t retained_context_tokens = 20 * 1024;
+        // Offline fallback matching Codex's 272K unknown-model descriptor. The
+        // real values are queried from /models before an online run. Keeping an
+        // explicit fallback lets CodexApi initialize and load saved conversation
+        // history without network access, even though it cannot sample a model.
+        CompactionConfig compaction{
+            .context_limit_tokens = 258'400,
+            .compact_at_tokens = 244'800,
+            .retained_context_tokens = 20 * 1024,
+            .maximum_summary_bytes = 32 * 1024,
+        };
         bool persist_conversation = true;
         std::optional<std::filesystem::path> resume_conversation;
         std::vector<std::shared_ptr<const ToolBase>> tools;

@@ -2,10 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "api.h"
+#include "http.h"
 #include "json.h"
 #include "response-item.h"
-
-#include <curl/curl.h>
 
 #include <algorithm>
 #include <array>
@@ -14,7 +13,6 @@
 #include <chrono>
 #include <cstddef>
 #include <ctime>
-#include <exception>
 #include <expected>
 #include <filesystem>
 #include <future>
@@ -112,12 +110,9 @@ namespace {
         std::string fallback_text;
         std::string line_buffer;
         std::string event_data;
-        std::string received_body;
-        std::string error;
         std::string turn_state;
         std::string turn_id;
         microcodex::CodexEventEmitter *events = nullptr;
-        std::stop_token stop_token;
         bool completed = false;
     };
 
@@ -323,40 +318,8 @@ namespace {
         return finishEvent(state);
     }
 
-    std::size_t receiveBody(char *data, const std::size_t size, const std::size_t count, void *user_data) {
-        const std::size_t byte_count = size * count;
-        auto &state = *static_cast<StreamState *>(user_data);
-        if (state.stop_token.stop_requested()) {
-            return 0;
-        }
-
-        try {
-            // Keep only a bounded copy for useful non-2xx HTTP error messages.
-            constexpr std::size_t maximum_error_body = 64 * 1024;
-            if (state.received_body.size() < maximum_error_body) {
-                const std::size_t remaining = maximum_error_body - state.received_body.size();
-                state.received_body.append(data, std::min(byte_count, remaining));
-            }
-
-            auto result = consumeSse(std::string_view(data, byte_count), state);
-            if (!result) {
-                state.error = result.error();
-                return 0;
-            }
-        } catch (const std::exception &error) {
-            state.error = std::string("Response callback failed: ") + error.what();
-            return 0;
-        } catch (...) {
-            state.error = "Response callback failed";
-            return 0;
-        }
-
-        return byte_count;
-    }
-
-    int transferProgress(void *user_data, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
-        const auto &state = *static_cast<const StreamState *>(user_data);
-        return state.stop_token.stop_requested() ? 1 : 0;
+    std::expected<void, std::string> receiveResponseBody(const std::string_view data, void *user_data) {
+        return consumeSse(data, *static_cast<StreamState *>(user_data));
     }
 
     std::string trim(std::string_view value) {
@@ -381,27 +344,13 @@ namespace {
         return true;
     }
 
-    std::size_t receiveHeader(char *data, const std::size_t size, const std::size_t count, void *user_data) {
-        const std::size_t byte_count = size * count;
+    std::expected<void, std::string> receiveResponseHeader(const std::string_view line, void *user_data) {
         auto &state = *static_cast<StreamState *>(user_data);
-        if (state.stop_token.stop_requested()) {
-            return 0;
+        const std::size_t colon = line.find(':');
+        if (colon != std::string_view::npos && equalsIgnoringCase(line.substr(0, colon), "x-codex-turn-state")) {
+            state.turn_state = trim(line.substr(colon + 1));
         }
-
-        try {
-            const std::string_view line(data, byte_count);
-            const std::size_t colon = line.find(':');
-            if (colon != std::string_view::npos && equalsIgnoringCase(line.substr(0, colon), "x-codex-turn-state")) {
-                state.turn_state = trim(line.substr(colon + 1));
-            }
-        } catch (const std::exception &error) {
-            state.error = std::string("Response header callback failed: ") + error.what();
-            return 0;
-        } catch (...) {
-            state.error = "Response header callback failed";
-            return 0;
-        }
-        return byte_count;
+        return {};
     }
 
     std::string responseErrorMessage(const std::string_view body, const long status) {
@@ -418,28 +367,6 @@ namespace {
         }
         return "Codex API returned HTTP " + std::to_string(status);
     }
-
-    class CurlHeaders {
-    public:
-        CurlHeaders() = default;
-        CurlHeaders(const CurlHeaders &) = delete;
-        CurlHeaders &operator=(const CurlHeaders &) = delete;
-        ~CurlHeaders() { curl_slist_free_all(headers_); }
-
-        bool append(const std::string &header) {
-            curl_slist *appended = curl_slist_append(headers_, header.c_str());
-            if (appended == nullptr) {
-                return false;
-            }
-            headers_ = appended;
-            return true;
-        }
-
-        curl_slist *get() const { return headers_; }
-
-    private:
-        curl_slist *headers_ = nullptr;
-    };
 
     // sendUserMessage() installs one stop source for the lifetime of a turn.
     // This guard clears it on every return path, including allocation and
@@ -469,11 +396,7 @@ namespace microcodex {
 
     CodexApi::CodexApi(CodexApiConfig config)
         : config_(std::move(config)),
-          compactor_(CompactionConfig{
-              .context_limit_tokens = config_.context_limit_tokens,
-              .compact_at_tokens = config_.compact_at_tokens,
-              .retained_context_tokens = config_.retained_context_tokens,
-          }),
+          compactor_(config_.compaction),
           installation_id_(makeUuid()),
           session_id_(makeUuid()) {}
 
@@ -934,83 +857,37 @@ namespace microcodex {
     }
 
     std::expected<CodexApi::ModelResponse, std::string> CodexApi::performRequest(std::string request_body, const std::stop_token stop_token, const std::string_view turn_id, const bool emit_events) const {
-
-        static const CURLcode curl_initialization = curl_global_init(CURL_GLOBAL_DEFAULT);
-        if (curl_initialization != CURLE_OK) {
-            return std::unexpected(std::string("Could not initialize HTTP client: ") + curl_easy_strerror(curl_initialization));
-        }
-
-        std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), &curl_easy_cleanup);
-        if (!curl) {
-            return std::unexpected("Could not create HTTP request");
-        }
-
-        CurlHeaders headers;
-        if (!headers.append("Authorization: Bearer " + config_.access_token) ||
-            (!config_.account_id.empty() && !headers.append("ChatGPT-Account-ID: " + config_.account_id)) ||
-            !headers.append("Content-Type: application/json") ||
-            !headers.append("Accept: text/event-stream") ||
-            !headers.append("originator: codex_cli_rs") ||
-            !headers.append("session-id: " + session_id_) ||
-            !headers.append("thread-id: " + session_id_) ||
-            !headers.append("x-client-request-id: " + session_id_) ||
-            !headers.append("x-codex-window-id: " + session_id_ + ":" + std::to_string(turn_number_ - 1)) ||
-            (emit_events && !turn_state_.empty() &&
-             !headers.append("x-codex-turn-state: " + turn_state_))) {
-            return std::unexpected("Could not allocate HTTP headers");
-        }
+        std::vector<std::string> headers{
+            "Authorization: Bearer " + config_.access_token,
+            "Content-Type: application/json",
+            "Accept: text/event-stream",
+            "originator: codex_cli_rs",
+            "session-id: " + session_id_,
+            "thread-id: " + session_id_,
+            "x-client-request-id: " + session_id_,
+            "x-codex-window-id: " + session_id_ + ":" + std::to_string(turn_number_ - 1),
+        };
+        if (!config_.account_id.empty()) headers.push_back("ChatGPT-Account-ID: " + config_.account_id);
+        if (emit_events && !turn_state_.empty()) headers.push_back("x-codex-turn-state: " + turn_state_);
 
         StreamState state;
         state.turn_id = std::string(turn_id);
         state.events = emit_events ? events_ : nullptr;
-        state.stop_token = stop_token;
-        std::array<char, CURL_ERROR_SIZE> curl_error{};
-
-        // libcurl's C callbacks receive StreamState through void*. Keeping all
-        // request-local callback state in this one object avoids global state
-        // and makes simultaneous tool threads irrelevant to HTTP parsing.
-        const auto setOption = [&curl](const CURLoption option, const auto value) {
-            return curl_easy_setopt(curl.get(), option, value) == CURLE_OK;
-        };
-
-        if (!setOption(CURLOPT_URL, config_.endpoint.c_str()) ||
-            !setOption(CURLOPT_HTTPHEADER, headers.get()) ||
-            !setOption(CURLOPT_POST, 1L) ||
-            !setOption(CURLOPT_POSTFIELDS, request_body.data()) ||
-            !setOption(CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(request_body.size())) ||
-            !setOption(CURLOPT_WRITEFUNCTION, &receiveBody) ||
-            !setOption(CURLOPT_WRITEDATA, &state) ||
-            !setOption(CURLOPT_HEADERFUNCTION, &receiveHeader) ||
-            !setOption(CURLOPT_HEADERDATA, &state) ||
-            !setOption(CURLOPT_XFERINFOFUNCTION, &transferProgress) ||
-            !setOption(CURLOPT_XFERINFODATA, &state) ||
-            !setOption(CURLOPT_NOPROGRESS, 0L) ||
-            !setOption(CURLOPT_ERRORBUFFER, curl_error.data()) ||
-            !setOption(CURLOPT_USERAGENT, "microcodex") ||
-            !setOption(CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS) ||
-            !setOption(CURLOPT_NOSIGNAL, 1L) ||
-            !setOption(CURLOPT_LOW_SPEED_LIMIT, 1L) ||
-            !setOption(CURLOPT_LOW_SPEED_TIME, config_.idle_timeout_seconds)) {
-            return std::unexpected("Could not configure HTTP request");
+        auto response = performHttpRequest({
+            .method = HttpMethod::Post,
+            .url = config_.endpoint,
+            .headers = headers,
+            .body = request_body,
+            .idle_timeout_seconds = config_.idle_timeout_seconds,
+            .total_timeout_seconds = 0,
+            .maximum_response_bytes = 64 * 1024,
+            .stop_token = stop_token,
+        }, receiveResponseBody, receiveResponseHeader, &state);
+        if (!response) {
+            if (stop_token.stop_requested()) return std::unexpected(std::string(interrupted_message));
+            return std::unexpected(response.error());
         }
-
-        const CURLcode result = curl_easy_perform(curl.get());
-        long status = 0;
-        curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &status);
-
-        if (stop_token.stop_requested()) {
-            return std::unexpected(std::string(interrupted_message));
-        }
-        if (!state.error.empty()) {
-            return std::unexpected(state.error);
-        }
-        if (result != CURLE_OK) {
-            const std::string detail = curl_error[0] != '\0' ? std::string(curl_error.data()) : std::string(curl_easy_strerror(result));
-            return std::unexpected("Codex API request failed: " + detail);
-        }
-        if (status < 200 || status >= 300) {
-            return std::unexpected(responseErrorMessage(state.received_body, status));
-        }
+        if (response->status < 200 || response->status >= 300) return std::unexpected(responseErrorMessage(response->body, response->status));
 
         auto final_event = finishSse(state);
         if (!final_event) {
