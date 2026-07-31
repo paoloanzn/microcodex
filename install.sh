@@ -6,7 +6,10 @@ REPOSITORY="paoloanzn/microcodex"
 RELEASE="${MICROCODEX_RELEASE:-latest}"
 BIN_DIR="${MICROCODEX_INSTALL_DIR:-$HOME/.local/bin}"
 BIN_PATH="$BIN_DIR/microcodex"
+REAL_BIN_PATH="$BIN_DIR/microcodex-bin"
 tmp_dir=""
+staged_binary=""
+staged_launcher=""
 path_action="already"
 path_profile=""
 
@@ -102,6 +105,10 @@ file_sha256() {
   exit 1
 }
 
+expected_digest() {
+  awk 'NR == 1 && length($1) == 64 && $1 !~ /[^0-9a-fA-F]/ { print tolower($1) }' "$1"
+}
+
 pick_profile() {
   case "$os:${SHELL:-}" in
     darwin:*/zsh) printf '%s\n' "$HOME/.zprofile" ;;
@@ -137,6 +144,12 @@ add_to_path() {
 cleanup() {
   if [ -n "$tmp_dir" ] && [ -d "$tmp_dir" ]; then
     rm -rf "$tmp_dir"
+  fi
+  if [ -n "$staged_binary" ]; then
+    rm -f "$staged_binary"
+  fi
+  if [ -n "$staged_launcher" ]; then
+    rm -f "$staged_launcher"
   fi
 }
 
@@ -181,10 +194,16 @@ else
 fi
 
 archive="microcodex-${target}.tar.gz"
-checksum="${archive}.sha256"
+archive_checksum="${archive}.sha256"
 binary="microcodex-${target}"
+binary_checksum="${binary}.sha256"
+launcher="launcher.sh"
+launcher_checksum="${launcher}.sha256"
 
-if [ "$RELEASE" = "latest" ]; then
+if [ -n "${MICROCODEX_RELEASES_URL:-}" ]; then
+  base_url="$MICROCODEX_RELEASES_URL"
+  release_label="$RELEASE"
+elif [ "$RELEASE" = "latest" ]; then
   base_url="https://github.com/${REPOSITORY}/releases/latest/download"
   release_label="latest"
 else
@@ -199,26 +218,39 @@ require_command install
 tmp_dir="$(mktemp -d)"
 trap cleanup EXIT HUP INT TERM
 archive_path="$tmp_dir/$archive"
-checksum_path="$tmp_dir/$checksum"
+archive_checksum_path="$tmp_dir/$archive_checksum"
+binary_checksum_path="$tmp_dir/$binary_checksum"
+launcher_path="$tmp_dir/$launcher"
+launcher_checksum_path="$tmp_dir/$launcher_checksum"
 
 step "Installing MicroCodex"
 step "Detected platform: $platform_label"
 step "Resolved release: $release_label"
 step "Downloading $archive"
 download_file "$base_url/$archive" "$archive_path"
-download_file "$base_url/$checksum" "$checksum_path"
+download_file "$base_url/$archive_checksum" "$archive_checksum_path"
+download_file "$base_url/$binary_checksum" "$binary_checksum_path"
+download_file "$base_url/$launcher" "$launcher_path"
+download_file "$base_url/$launcher_checksum" "$launcher_checksum_path"
 
-expected_digest="$(awk 'NR == 1 && length($1) == 64 && $1 !~ /[^0-9a-fA-F]/ { print tolower($1) }' "$checksum_path")"
-if [ -z "$expected_digest" ]; then
+expected_archive_digest="$(expected_digest "$archive_checksum_path")"
+if [ -z "$expected_archive_digest" ]; then
   echo "The downloaded checksum file is invalid." >&2
   exit 1
 fi
 
-actual_digest="$(file_sha256 "$archive_path")"
-if [ "$actual_digest" != "$expected_digest" ]; then
+actual_archive_digest="$(file_sha256 "$archive_path")"
+if [ "$actual_archive_digest" != "$expected_archive_digest" ]; then
   echo "Downloaded MicroCodex archive checksum did not match." >&2
-  echo "expected: $expected_digest" >&2
-  echo "actual:   $actual_digest" >&2
+  echo "expected: $expected_archive_digest" >&2
+  echo "actual:   $actual_archive_digest" >&2
+  exit 1
+fi
+
+expected_launcher_digest="$(expected_digest "$launcher_checksum_path")"
+actual_launcher_digest="$(file_sha256 "$launcher_path")"
+if [ -z "$expected_launcher_digest" ] || [ "$actual_launcher_digest" != "$expected_launcher_digest" ]; then
+  echo "Downloaded MicroCodex launcher checksum did not match." >&2
   exit 1
 fi
 
@@ -234,11 +266,23 @@ if [ ! -f "$tmp_dir/$binary" ]; then
   exit 1
 fi
 
-step "Installing to $BIN_PATH"
+expected_binary_digest="$(expected_digest "$binary_checksum_path")"
+actual_binary_digest="$(file_sha256 "$tmp_dir/$binary")"
+if [ -z "$expected_binary_digest" ] || [ "$actual_binary_digest" != "$expected_binary_digest" ]; then
+  echo "Extracted MicroCodex binary checksum did not match." >&2
+  exit 1
+fi
+
+step "Installing launcher to $BIN_PATH"
 mkdir -p "$BIN_DIR"
-staged_path="$BIN_DIR/.microcodex.$$"
-install -m 755 "$tmp_dir/$binary" "$staged_path"
-mv -f "$staged_path" "$BIN_PATH"
+staged_binary="$BIN_DIR/.microcodex-bin.$$"
+staged_launcher="$BIN_DIR/.microcodex-launcher.$$"
+install -m 755 "$tmp_dir/$binary" "$staged_binary"
+install -m 755 "$launcher_path" "$staged_launcher"
+mv -f "$staged_binary" "$REAL_BIN_PATH"
+staged_binary=""
+mv -f "$staged_launcher" "$BIN_PATH"
+staged_launcher=""
 
 add_to_path
 case "$path_action" in

@@ -109,8 +109,18 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Add installer to release assets
-        run: cp install.sh dist/install.sh
+      - name: Add installer and launcher to release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp install.sh launcher.sh dist/
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd dist && sha256sum install.sh > install.sh.sha256)
+            (cd dist && sha256sum launcher.sh > launcher.sh.sha256)
+          else
+            (cd dist && shasum -a 256 install.sh > install.sh.sha256)
+            (cd dist && shasum -a 256 launcher.sh > launcher.sh.sha256)
+          fi
 
       - name: Upload assets to the release
         env:

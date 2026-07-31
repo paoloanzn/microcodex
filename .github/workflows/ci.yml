@@ -68,6 +68,7 @@ jobs:
       - name: Verify installer
         run: |
           sh -n install.sh
+          sh -n launcher.sh
           ./install.sh --help >/dev/null
 
       - name: Build
@@ -87,6 +88,11 @@ jobs:
           mkdir -p dist
           cp build/microcodex "dist/${binary}"
           chmod 755 "dist/${binary}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd dist && sha256sum "${binary}" > "${binary}.sha256")
+          else
+            (cd dist && shasum -a 256 "${binary}" > "${binary}.sha256")
+          fi
           tar -C dist -czf "dist/${archive}" "${binary}"
           if command -v sha256sum >/dev/null 2>&1; then
             (cd dist && sha256sum "${archive}" > "${archive}.sha256")
@@ -101,5 +107,6 @@ jobs:
           path: |
             dist/microcodex-${{ matrix.target }}.tar.gz
             dist/microcodex-${{ matrix.target }}.tar.gz.sha256
+            dist/microcodex-${{ matrix.target }}.sha256
           if-no-files-found: error
           retention-days: 7
