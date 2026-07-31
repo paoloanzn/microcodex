@@ -1,3 +1,6 @@
 [submodule "vendor/termbox2"]
 	path = vendor/termbox2
 	url = https://github.com/termbox/termbox2.git
+[submodule "vendor/md4c"]
+	path = vendor/md4c
+	url = https://github.com/mity/md4c.git

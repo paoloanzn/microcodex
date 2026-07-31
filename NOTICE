@@ -1,5 +1,11 @@
 microcodex
 Copyright 2026 Paolo Anzani
 
-This product includes software developed by Your Name or Company
-(https://example.com/).
+This product includes termbox2, copyright 2021 termbox developers,
+licensed under the MIT License.
+
+This product includes MD4C, copyright 2016-2024 Martin Mitáš,
+licensed under the MIT License.
+
+The complete third-party license texts are included with their source under
+vendor/.

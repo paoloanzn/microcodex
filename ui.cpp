@@ -1,12 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Paolo Anzani
 // SPDX-License-Identifier: Apache-2.0
 
-// termbox2 is a single-header library. Its implementation must be enabled in
-// exactly one translation unit, and the header must precede system headers so
-// its POSIX feature-test macros take effect.
-#define TB_IMPL
-#include <termbox2.h>
-
+#include "styled-text.h"
+#include "markdown.h"
 #include "ui.h"
 
 #include <algorithm>
@@ -25,6 +21,15 @@
 #include <vector>
 
 namespace {
+
+    using microcodex::ui::StyledLine;
+    using microcodex::ui::StyledSpan;
+    using microcodex::ui::appendSpan;
+    using microcodex::ui::decodeCodepoint;
+    using microcodex::ui::lineWithPrefix;
+    using microcodex::ui::renderMarkdown;
+    using microcodex::ui::textWidth;
+    using microcodex::ui::wrapStyledText;
 
     constexpr std::size_t maximum_transcript_bytes = 512 * 1024;
     constexpr std::size_t maximum_tool_preview_bytes = 16 * 1024;
@@ -144,17 +149,6 @@ namespace {
         std::vector<std::string> lines;
         std::size_t cursor_line = 0;
         int cursor_column = 0;
-    };
-
-    struct StyledSpan {
-        std::string text;
-        uintattr_t foreground = TB_DEFAULT;
-    };
-
-    struct StyledLine {
-        std::vector<StyledSpan> spans;
-        uintattr_t background = TB_DEFAULT;
-        bool fill_background = false;
     };
 
     using TurnResult = std::expected<microcodex::CodexApiResponse, std::string>;
@@ -352,40 +346,6 @@ namespace {
         state.dirty = true;
     }
 
-    std::pair<std::uint32_t, std::size_t> decodeCodepoint(
-        const std::string_view text, const std::size_t offset) {
-        if (offset >= text.size()) {
-            return {0, 0};
-        }
-
-        const int requested = tb_utf8_char_length(text[offset]);
-        if (requested <= 0 || offset + static_cast<std::size_t>(requested) > text.size()) {
-            return {0xfffd, 1};
-        }
-
-        char utf8[7]{};
-        std::copy_n(text.data() + offset, requested, utf8);
-        std::uint32_t codepoint = 0xfffd;
-        const int decoded = tb_utf8_char_to_unicode(&codepoint, utf8);
-        if (decoded <= 0) {
-            return {0xfffd, 1};
-        }
-        return {codepoint, static_cast<std::size_t>(decoded)};
-    }
-
-    int textWidth(const std::string_view text) {
-        int width = 0;
-        for (std::size_t offset = 0; offset < text.size();) {
-            auto [codepoint, length] = decodeCodepoint(text, offset);
-            if (length == 0) {
-                break;
-            }
-            width += std::max(0, tb_wcwidth(codepoint));
-            offset += length;
-        }
-        return width;
-    }
-
     WrappedText wrapText(const std::string_view text, const int width,
                          const std::string_view first_prefix,
                          const std::string_view continuation_prefix,
@@ -474,109 +434,6 @@ namespace {
         return result;
     }
 
-    void appendSpan(StyledLine &line, const std::string_view text,
-                    const uintattr_t foreground = TB_DEFAULT) {
-        if (text.empty()) {
-            return;
-        }
-        if (!line.spans.empty() && line.spans.back().foreground == foreground) {
-            line.spans.back().text.append(text);
-        } else {
-            line.spans.push_back({std::string(text), foreground});
-        }
-    }
-
-    StyledLine lineWithPrefix(
-        const std::initializer_list<StyledSpan> prefix,
-        const uintattr_t background = TB_DEFAULT,
-        const bool fill_background = false) {
-        StyledLine line{
-            .spans = {},
-            .background = background,
-            .fill_background = fill_background,
-        };
-        for (const StyledSpan &span : prefix) {
-            appendSpan(line, span.text, span.foreground);
-        }
-        return line;
-    }
-
-    // Wrap one styled body after a styled prefix. This is deliberately smaller
-    // than a general rich-text engine: transcript entries only need a prefix,
-    // one body style, and a differently indented continuation line.
-    std::vector<StyledLine> wrapStyledText(
-        const std::string_view text, const int requested_width,
-        const StyledLine &first_template, const StyledLine &continuation_template,
-        const uintattr_t text_foreground = TB_DEFAULT) {
-        const int width = std::max(1, requested_width);
-        std::vector<StyledLine> result;
-        StyledLine line = first_template;
-        int column = 0;
-        for (const StyledSpan &span : line.spans) {
-            column += textWidth(span.text);
-        }
-        int content_start = column;
-
-        const auto startContinuation = [&] {
-            result.push_back(std::move(line));
-            line = continuation_template;
-            column = 0;
-            for (const StyledSpan &span : line.spans) {
-                column += textWidth(span.text);
-            }
-            content_start = column;
-        };
-
-        for (std::size_t offset = 0; offset < text.size();) {
-            auto [codepoint, length] = decodeCodepoint(text, offset);
-            if (length == 0) {
-                break;
-            }
-            offset += length;
-
-            if (codepoint == '\r') {
-                continue;
-            }
-            if (codepoint == '\n') {
-                startContinuation();
-                continue;
-            }
-            if (codepoint == '\t') {
-                const int spaces = 4 - (column % 4);
-                for (int index = 0; index < spaces; ++index) {
-                    if (column >= width && column > content_start) {
-                        startContinuation();
-                    }
-                    appendSpan(line, " ", text_foreground);
-                    ++column;
-                }
-                continue;
-            }
-
-            int codepoint_width = tb_wcwidth(codepoint);
-            if (codepoint_width < 0) {
-                codepoint = 0xfffd;
-                codepoint_width = 1;
-            }
-            if (codepoint_width > 0 && column + codepoint_width > width &&
-                column > content_start) {
-                startContinuation();
-            }
-
-            char utf8[7]{};
-            const int encoded = tb_utf8_unicode_to_char(utf8, codepoint);
-            if (encoded > 0) {
-                appendSpan(line,
-                           std::string_view(utf8, static_cast<std::size_t>(encoded)),
-                           text_foreground);
-            }
-            column += std::max(0, codepoint_width);
-        }
-
-        result.push_back(std::move(line));
-        return result;
-    }
-
     void appendLines(std::vector<StyledLine> &destination,
                      std::vector<StyledLine> source) {
         for (StyledLine &line : source) {
@@ -618,6 +475,32 @@ namespace {
                                           output_continuation, muted_foreground));
     }
 
+    void appendAssistantLines(std::vector<StyledLine> &lines,
+                              const std::string_view markdown,
+                              const int width) {
+        std::vector<StyledLine> rendered = renderMarkdown(markdown, std::max(1, width - 2));
+        bool first_content_line = true;
+        for (StyledLine &source : rendered) {
+            if (source.spans.empty()) {
+                lines.push_back(std::move(source));
+                continue;
+            }
+
+            StyledLine line{
+                .spans = {},
+                .background = source.background,
+                .fill_background = source.fill_background,
+            };
+            appendSpan(line, first_content_line ? "• " : "  ",
+                       first_content_line ? muted_foreground | TB_DIM : TB_DEFAULT);
+            first_content_line = false;
+            for (StyledSpan &span : source.spans) {
+                appendSpan(line, span.text, span.foreground);
+            }
+            lines.push_back(std::move(line));
+        }
+    }
+
     std::vector<StyledLine> transcriptLines(const UiState &state, const int width) {
         std::vector<StyledLine> lines;
         const UiEntry *previous_entry = nullptr;
@@ -650,10 +533,7 @@ namespace {
                 break;
             }
             case EntryKind::Assistant:
-                appendLines(lines, wrapStyledText(
-                    entry.text, width,
-                    lineWithPrefix({{"• ", muted_foreground | TB_DIM}}),
-                    lineWithPrefix({{"  ", TB_DEFAULT}})));
+                appendAssistantLines(lines, entry.text, width);
                 lines.push_back({});
                 break;
             case EntryKind::Tool:
