@@ -32,8 +32,7 @@ namespace microcodex::json {
         return -1;
     }
 
-    std::expected<std::uint32_t, std::string> parseHexCodePoint(const std::string_view json,
-                                                                std::size_t &position) {
+    std::expected<std::uint32_t, std::string> parseHexCodePoint(const std::string_view json, std::size_t &position) {
         if (json.size() - position < 4) {
             return std::unexpected("Incomplete Unicode escape in JSON string");
         }
@@ -73,8 +72,7 @@ namespace microcodex::json {
     // Parse one quoted JSON string, unescaping characters and Unicode escapes.
     // Example: parsing "\"line\\n\"" returns a string containing line + '\n'.
     // On success position points immediately after the closing quote.
-    std::expected<std::string, std::string> parseJsonString(const std::string_view json,
-                                                            std::size_t &position) {
+    std::expected<std::string, std::string> parseJsonString(const std::string_view json, std::size_t &position) {
         if (position == json.size() || json[position] != '"') {
             return std::unexpected("Expected a JSON string");
         }
@@ -379,8 +377,7 @@ namespace microcodex::json {
     }
 
     // Like jsonStringMember, but report an error when the key is absent.
-    std::expected<std::string, std::string> requiredJsonString(const std::string_view object,
-                                                               const std::string_view key) {
+    std::expected<std::string, std::string> requiredJsonString(const std::string_view object, const std::string_view key) {
         auto value = jsonStringMember(object, key);
         if (!value) {
             return std::unexpected(value.error());

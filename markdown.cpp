@@ -40,8 +40,7 @@ namespace {
         return color | attributes;
     }
 
-    void appendLines(std::vector<StyledLine> &destination,
-                     std::vector<StyledLine> source) {
+    void appendLines(std::vector<StyledLine> &destination, std::vector<StyledLine> source) {
         for (StyledLine &line : source) {
             destination.push_back(std::move(line));
         }
@@ -121,36 +120,31 @@ namespace {
         }
 
     private:
-        static int enterBlockCallback(const MD_BLOCKTYPE type, void *detail,
-                                      void *userdata) noexcept {
+        static int enterBlockCallback(const MD_BLOCKTYPE type, void *detail, void *userdata) noexcept {
             return callSafely(userdata, [=](MarkdownRenderer &renderer) {
                 renderer.enterBlock(type, detail);
             });
         }
 
-        static int leaveBlockCallback(const MD_BLOCKTYPE type, void *detail,
-                                      void *userdata) noexcept {
+        static int leaveBlockCallback(const MD_BLOCKTYPE type, void *detail, void *userdata) noexcept {
             return callSafely(userdata, [=](MarkdownRenderer &renderer) {
                 renderer.leaveBlock(type, detail);
             });
         }
 
-        static int enterSpanCallback(const MD_SPANTYPE type, void *detail,
-                                     void *userdata) noexcept {
+        static int enterSpanCallback(const MD_SPANTYPE type, void *detail, void *userdata) noexcept {
             return callSafely(userdata, [=](MarkdownRenderer &renderer) {
                 renderer.enterSpan(type, detail);
             });
         }
 
-        static int leaveSpanCallback(const MD_SPANTYPE type, void *detail,
-                                     void *userdata) noexcept {
+        static int leaveSpanCallback(const MD_SPANTYPE type, void *detail, void *userdata) noexcept {
             return callSafely(userdata, [=](MarkdownRenderer &renderer) {
                 renderer.leaveSpan(type, detail);
             });
         }
 
-        static int textCallback(const MD_TEXTTYPE type, const MD_CHAR *text,
-                                const MD_SIZE size, void *userdata) noexcept {
+        static int textCallback(const MD_TEXTTYPE type, const MD_CHAR *text, const MD_SIZE size, void *userdata) noexcept {
             return callSafely(userdata, [=](MarkdownRenderer &renderer) {
                 renderer.addText(type, std::string_view(text, size));
             });
@@ -540,8 +534,7 @@ namespace {
             return widths;
         }
 
-        void renderColumnTable(const std::vector<TableState::Row> &rows,
-                               const std::vector<std::size_t> &widths) {
+        void renderColumnTable(const std::vector<TableState::Row> &rows, const std::vector<std::size_t> &widths) {
             for (std::size_t row_index = 0; row_index < rows.size(); ++row_index) {
                 StyledLine line;
                 const TableState::Row &row = rows[row_index];
@@ -651,8 +644,7 @@ namespace {
 
 namespace microcodex::ui {
 
-    std::vector<StyledLine> renderMarkdown(const std::string_view source,
-                                           const int width) {
+    std::vector<StyledLine> renderMarkdown(const std::string_view source, const int width) {
         return MarkdownRenderer(width).render(source);
     }
 

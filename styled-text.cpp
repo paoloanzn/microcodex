@@ -43,8 +43,7 @@ namespace microcodex::ui {
         return width;
     }
 
-    void appendSpan(StyledLine &line, const std::string_view text,
-                    const uintattr_t foreground) {
+    void appendSpan(StyledLine &line, const std::string_view text, const uintattr_t foreground) {
         if (text.empty()) {
             return;
         }
@@ -55,10 +54,7 @@ namespace microcodex::ui {
         }
     }
 
-    StyledLine lineWithPrefix(
-        const std::initializer_list<StyledSpan> prefix,
-        const uintattr_t background,
-        const bool fill_background) {
+    StyledLine lineWithPrefix(const std::initializer_list<StyledSpan> prefix, const uintattr_t background, const bool fill_background) {
         StyledLine line{
             .spans = {},
             .background = background,
@@ -70,10 +66,7 @@ namespace microcodex::ui {
         return line;
     }
 
-    std::vector<StyledLine> wrapStyledSpans(
-        const std::span<const StyledSpan> spans, const int requested_width,
-        const StyledLine &first_template,
-        const StyledLine &continuation_template) {
+    std::vector<StyledLine> wrapStyledSpans(const std::span<const StyledSpan> spans, const int requested_width, const StyledLine &first_template, const StyledLine &continuation_template) {
         const int width = std::max(1, requested_width);
         std::vector<StyledLine> result;
         StyledLine line = first_template;
@@ -145,11 +138,7 @@ namespace microcodex::ui {
         return result;
     }
 
-    std::vector<StyledLine> wrapStyledText(
-        const std::string_view text, const int width,
-        const StyledLine &first_template,
-        const StyledLine &continuation_template,
-        const uintattr_t foreground) {
+    std::vector<StyledLine> wrapStyledText(const std::string_view text, const int width, const StyledLine &first_template, const StyledLine &continuation_template, const uintattr_t foreground) {
         const StyledSpan span{std::string(text), foreground};
         return wrapStyledSpans(std::span<const StyledSpan>(&span, 1), width,
                                first_template, continuation_template);

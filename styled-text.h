@@ -35,25 +35,14 @@ namespace microcodex::ui {
 
     // Adjacent spans with the same style are combined. This keeps terminal
     // drawing and wrapping cheap when a parser emits many small text pieces.
-    void appendSpan(StyledLine &line, std::string_view text,
-                    uintattr_t foreground = TB_DEFAULT);
+    void appendSpan(StyledLine &line, std::string_view text, uintattr_t foreground = TB_DEFAULT);
 
-    StyledLine lineWithPrefix(
-        std::initializer_list<StyledSpan> prefix,
-        uintattr_t background = TB_DEFAULT,
-        bool fill_background = false);
+    StyledLine lineWithPrefix(std::initializer_list<StyledSpan> prefix, uintattr_t background = TB_DEFAULT, bool fill_background = false);
 
     // Wrap styled text while preserving each span's color and attributes.
     // Prefix templates describe the first and continuation line indentation.
-    std::vector<StyledLine> wrapStyledSpans(
-        std::span<const StyledSpan> spans, int width,
-        const StyledLine &first_template,
-        const StyledLine &continuation_template);
+    std::vector<StyledLine> wrapStyledSpans(std::span<const StyledSpan> spans, int width, const StyledLine &first_template, const StyledLine &continuation_template);
 
-    std::vector<StyledLine> wrapStyledText(
-        std::string_view text, int width,
-        const StyledLine &first_template,
-        const StyledLine &continuation_template,
-        uintattr_t foreground = TB_DEFAULT);
+    std::vector<StyledLine> wrapStyledText(std::string_view text, int width, const StyledLine &first_template, const StyledLine &continuation_template, uintattr_t foreground = TB_DEFAULT);
 
 } // namespace microcodex::ui
