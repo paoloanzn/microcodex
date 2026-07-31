@@ -59,6 +59,14 @@ namespace {
         Notice,
     };
 
+    struct MarkdownRenderCache {
+        // Assistant text is append-only, so its byte length is a sufficient
+        // revision key. Width changes naturally invalidate resize layout.
+        std::vector<StyledLine> lines;
+        std::size_t source_size = 0;
+        int width = -1;
+    };
+
     struct UiEntry {
         EntryKind kind;
         std::string turn_id;
@@ -66,6 +74,7 @@ namespace {
         std::string title;
         std::string text;
         std::string output;
+        MarkdownRenderCache markdown_cache;
         bool finished = true;
         bool succeeded = true;
     };
@@ -217,6 +226,7 @@ namespace {
             .title = kind == EntryKind::Error ? "error" : "notice",
             .text = std::string(text),
             .output = {},
+            .markdown_cache = {},
         });
     }
 
@@ -243,6 +253,7 @@ namespace {
                     .title = "codex",
                     .text = event.text,
                     .output = {},
+                    .markdown_cache = {},
                     .finished = false,
                 });
             }
@@ -256,6 +267,7 @@ namespace {
                 .title = event.tool_name,
                 .text = event.text,
                 .output = {},
+                .markdown_cache = {},
                 .finished = false,
             });
             state.status = "Running " + event.tool_name + "...";
@@ -271,6 +283,7 @@ namespace {
                     .title = event.tool_name,
                     .text = {},
                     .output = {},
+                    .markdown_cache = {},
                     .finished = false,
                 });
             }
@@ -499,14 +512,20 @@ namespace {
                                           output_continuation, muted_foreground));
     }
 
-    void appendAssistantLines(std::vector<StyledLine> &lines,
-                              const std::string_view markdown,
+    void appendAssistantLines(std::vector<StyledLine> &lines, UiEntry &entry,
                               const int width) {
-        std::vector<StyledLine> rendered = renderMarkdown(markdown, std::max(1, width - 2));
+        const int content_width = std::max(1, width - 2);
+        MarkdownRenderCache &cache = entry.markdown_cache;
+        if (cache.width != content_width || cache.source_size != entry.text.size()) {
+            cache.lines = renderMarkdown(entry.text, content_width);
+            cache.source_size = entry.text.size();
+            cache.width = content_width;
+        }
+
         bool first_content_line = true;
-        for (StyledLine &source : rendered) {
+        for (const StyledLine &source : cache.lines) {
             if (source.spans.empty()) {
-                lines.push_back(std::move(source));
+                lines.push_back(source);
                 continue;
             }
 
@@ -518,17 +537,17 @@ namespace {
             appendSpan(line, first_content_line ? "• " : "  ",
                        first_content_line ? muted_foreground | TB_DIM : TB_DEFAULT);
             first_content_line = false;
-            for (StyledSpan &span : source.spans) {
+            for (const StyledSpan &span : source.spans) {
                 appendSpan(line, span.text, span.foreground);
             }
             lines.push_back(std::move(line));
         }
     }
 
-    std::vector<StyledLine> transcriptLines(const UiState &state, const int width) {
+    std::vector<StyledLine> transcriptLines(UiState &state, const int width) {
         std::vector<StyledLine> lines;
         const UiEntry *previous_entry = nullptr;
-        for (const UiEntry &entry : state.transcript) {
+        for (UiEntry &entry : state.transcript) {
             if (previous_entry != nullptr && previous_entry->kind == EntryKind::Tool &&
                 entry.kind == EntryKind::Tool) {
                 // Tool output can be visually dense. Codex leaves a little
@@ -557,7 +576,7 @@ namespace {
                 break;
             }
             case EntryKind::Assistant:
-                appendAssistantLines(lines, entry.text, width);
+                appendAssistantLines(lines, entry, width);
                 lines.push_back({});
                 break;
             case EntryKind::Tool:
@@ -799,6 +818,7 @@ namespace {
             .title = "you",
             .text = message,
             .output = {},
+            .markdown_cache = {},
         });
 
         try {
