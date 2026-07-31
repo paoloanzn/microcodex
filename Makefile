@@ -1,12 +1,24 @@
+UNAME_S := $(shell uname -s)
+PLATFORM_FLAGS :=
+PLATFORM_LIBS :=
+
+ifeq ($(UNAME_S),Darwin)
 CXX := clang++
 CC  := clang
-
 SDKROOT := $(shell xcrun --sdk macosx --show-sdk-path)
+PLATFORM_FLAGS += -isysroot $(SDKROOT)
+else ifeq ($(UNAME_S),Linux)
+CXX := g++
+CC  := gcc
+PLATFORM_LIBS += -lcrypto
+else
+$(error Unsupported operating system: $(UNAME_S))
+endif
 
-CXXFLAGS := -std=c++23 -O2 -Wall -Wextra -pthread -isysroot $(SDKROOT) -isystem vendor/termbox2
-CFLAGS   := -std=c17 -Wall -Wextra -isysroot $(SDKROOT)
-LDFLAGS  := -pthread -isysroot $(SDKROOT)
-LDLIBS   := -lcurl
+CXXFLAGS := -std=c++23 -O2 -Wall -Wextra -pthread $(PLATFORM_FLAGS) -isystem vendor/termbox2
+CFLAGS   := -std=c17 -Wall -Wextra $(PLATFORM_FLAGS)
+LDFLAGS  := -pthread $(PLATFORM_FLAGS)
+LDLIBS   := -lcurl $(PLATFORM_LIBS)
 
 TARGET := build/app
 

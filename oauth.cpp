@@ -6,7 +6,13 @@
 #include "api.h"
 #include "json.h"
 
+#ifdef __APPLE__
 #include <CommonCrypto/CommonDigest.h>
+#elif defined(__linux__)
+#include <openssl/sha.h>
+#else
+#error "OAuth SHA-256 is unsupported on this platform"
+#endif
 #include <arpa/inet.h>
 #include <curl/curl.h>
 #include <fcntl.h>
@@ -180,8 +186,8 @@ namespace {
     // Generates the high-entropy PKCE verifier and anti-CSRF state value.
     std::string randomBase64Url(const std::size_t byte_count) {
         std::string bytes(byte_count, '\0');
-        // arc4random_buf is the OS CSPRNG on macOS and needs no caller-managed
-        // state.
+        // arc4random_buf is provided by macOS and modern glibc and needs no
+        // caller-managed state.
         ::arc4random_buf(bytes.data(), bytes.size());
         return base64UrlEncode(
             std::span(reinterpret_cast<const unsigned char *>(bytes.data()), bytes.size()));
@@ -189,8 +195,13 @@ namespace {
 
     // RFC 7636 defines an S256 challenge as BASE64URL(SHA256(verifier)).
     std::string sha256Base64Url(const std::string_view value) {
+#ifdef __APPLE__
         std::array<unsigned char, CC_SHA256_DIGEST_LENGTH> digest{};
         CC_SHA256(value.data(), static_cast<CC_LONG>(value.size()), digest.data());
+#else
+        std::array<unsigned char, SHA256_DIGEST_LENGTH> digest{};
+        SHA256(reinterpret_cast<const unsigned char *>(value.data()), value.size(), digest.data());
+#endif
         return base64UrlEncode(digest);
     }
 
