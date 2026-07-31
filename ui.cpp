@@ -774,7 +774,7 @@ namespace {
                 appendSpan(line, prompt.lines[index]);
             }
             if (state.input.empty() && index == 0) {
-                appendSpan(line, "Ask Codex to do anything", muted_foreground | TB_DIM);
+                appendSpan(line, "Ask MicroCodex to do anything", muted_foreground | TB_DIM);
             }
             drawLine(line, prompt_top + prompt_row, width);
         }
