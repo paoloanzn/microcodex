@@ -136,7 +136,7 @@ namespace microcodex {
             R"({"type":"object","properties":{"pattern":{"type":"string"}},"required":["pattern"],"additionalProperties":false})",
             executeGlob));
         tools.emplace_back(std::make_shared<BashTool>(
-            "bash", "Run a command and return JSON containing stdout, stderr, and exit_code. It executes a program and arguments; use bash -lc with a quoted script when shell syntax is needed.",
+            "bash", "Run a shell command in the user's login-shell environment and return JSON containing stdout, stderr, and exit_code.",
             static_cast<std::expected<BashCommandResult, std::string> (*)(const std::string &, std::stop_token)>(bash),
             R"({"type":"object","properties":{"command":{"type":"string"}},"required":["command"],"additionalProperties":false})",
             executeBash));

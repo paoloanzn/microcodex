@@ -59,8 +59,8 @@ namespace microcodex {
     std::expected<std::vector<ConversationSummary>, std::string> listConversations(const std::filesystem::path &directory);
 
     // ConversationFile is the sole durable representation of a conversation.
-    // It stores completed turns and compaction checkpoints; incomplete turns
-    // deliberately remain only in CodexApi memory.
+    // It stores terminal turns (completed or explicitly interrupted) and
+    // compaction checkpoints. Failed turns that are rolled back are not saved.
     class ConversationFile {
     public:
         static std::expected<ConversationFile, std::string> create(const std::filesystem::path &directory, const ConversationMetadata &metadata);

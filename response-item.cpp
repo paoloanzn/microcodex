@@ -53,6 +53,14 @@ namespace microcodex {
         return item;
     }
 
+    std::string assistantMessageItem(const std::string_view message) {
+        std::string item =
+            "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":";
+        json::appendJsonString(item, message);
+        item += "}]}";
+        return item;
+    }
+
     std::string toolOutputItem(const CodexToolOutput &output) {
         std::string item = "{\"type\":\"function_call_output\",\"call_id\":";
         json::appendJsonString(item, output.call_id);

@@ -5,11 +5,13 @@
 
 #include <array>
 #include <cerrno>
-#include <cctype>
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <cstring>
 #include <expected>
+#include <filesystem>
+#include <optional>
 #include <poll.h>
 #include <stdexcept>
 #include <stop_token>
@@ -21,67 +23,6 @@
 #include <vector>
 
 namespace {
-
-    std::expected<std::vector<std::string>, std::string> splitCmdOnWhiteSpaces(const std::string &cmd) {
-        std::vector<std::string> arguments;
-        std::string argument;
-        bool building_argument = false;
-        std::string::size_type position = 0;
-
-        while (position < cmd.size()) {
-            const char character = cmd[position++];
-
-            if (std::isspace(static_cast<unsigned char>(character))) {
-                if (building_argument) {
-                    arguments.push_back(std::move(argument));
-                    argument.clear();
-                    building_argument = false;
-                }
-                continue;
-            }
-
-            building_argument = true;
-            if (character == '\\') {
-                if (position == cmd.size()) {
-                    return std::unexpected("trailing escape character");
-                }
-                argument += cmd[position++];
-                continue;
-            }
-
-            if (character != '\'' && character != '"') {
-                argument += character;
-                continue;
-            }
-
-            const char quote = character;
-            bool quote_closed = false;
-            while (position < cmd.size()) {
-                const char quoted_character = cmd[position++];
-                if (quoted_character == quote) {
-                    quote_closed = true;
-                    break;
-                }
-                if (quote == '"' && quoted_character == '\\') {
-                    if (position == cmd.size()) {
-                        return std::unexpected("trailing escape character");
-                    }
-                    argument += cmd[position++];
-                } else {
-                    argument += quoted_character;
-                }
-            }
-
-            if (!quote_closed) {
-                return std::unexpected(quote == '\'' ? "unterminated single quote" : "unterminated double quote");
-            }
-        }
-
-        if (building_argument) {
-            arguments.push_back(std::move(argument));
-        }
-        return arguments;
-    }
 
     void closeDescriptor(int &descriptor) {
         if (descriptor != -1) {
@@ -109,16 +50,13 @@ namespace {
         }
     }
 
-    microcodex::BashCommandResult runProcess(const std::string &cmd, const std::stop_token stop_token) {
+    microcodex::BashCommandResult runProcess(
+        const std::vector<std::string> &arguments,
+        const std::stop_token stop_token,
+        const std::optional<std::chrono::steady_clock::time_point> deadline = std::nullopt) {
         if (stop_token.stop_requested()) {
             throw std::runtime_error("Command interrupted");
         }
-
-        auto split_arguments = splitCmdOnWhiteSpaces(cmd);
-        if (!split_arguments) {
-            throw std::invalid_argument(split_arguments.error());
-        }
-        std::vector<std::string> arguments = std::move(*split_arguments);
         if (arguments.empty()) {
             throw std::invalid_argument("command must not be empty");
         }
@@ -189,9 +127,16 @@ namespace {
         bool child_exited = false;
         bool sent_interrupt = false;
         bool sent_kill = false;
+        bool timed_out = false;
         std::chrono::steady_clock::time_point interrupt_time;
 
         while (open_streams > 0 || !child_exited) {
+            if (deadline && std::chrono::steady_clock::now() >= *deadline &&
+                !sent_kill && !child_exited) {
+                signalProcess(pid, SIGKILL);
+                sent_kill = true;
+                timed_out = true;
+            }
             if (stop_token.stop_requested() && !sent_interrupt && !child_exited) {
                 signalProcess(pid, SIGINT);
                 sent_interrupt = true;
@@ -260,6 +205,10 @@ namespace {
             }
         }
 
+        if (timed_out) {
+            throw std::runtime_error("Command timed out");
+        }
+
         if (WIFEXITED(status)) {
             result.error_code = WEXITSTATUS(status);
         } else if (WIFSIGNALED(status)) {
@@ -268,6 +217,115 @@ namespace {
             result.error_code = -1;
         }
         return result;
+    }
+
+    std::string shellSingleQuote(const std::string_view value) {
+        std::string quoted;
+        quoted.reserve(value.size() + 8);
+        for (const char character : value) {
+            if (character == '\'') {
+                quoted += "'\\''";
+            } else {
+                quoted += character;
+            }
+        }
+        return quoted;
+    }
+
+    std::string shellRcPrefix(const std::filesystem::path &shell) {
+        const std::string name = shell.filename().string();
+        if (name == "zsh") {
+            return R"(if [[ -n "$ZDOTDIR" ]]; then __microcodex_rc="$ZDOTDIR/.zshrc"; else __microcodex_rc="$HOME/.zshrc"; fi; [[ -r "$__microcodex_rc" ]] && . "$__microcodex_rc"; unset __microcodex_rc; )";
+        }
+        if (name == "bash") {
+            return R"(if [[ -z "$BASH_ENV" && -r "$HOME/.bashrc" ]]; then . "$HOME/.bashrc"; fi; )";
+        }
+        return R"(if [ -n "$ENV" ] && [ -r "$ENV" ]; then . "$ENV"; fi; )";
+    }
+
+    class UserShellContext {
+    public:
+        explicit UserShellContext(const std::stop_token stop_token) {
+            const char *configured = std::getenv("SHELL");
+            shell_ = configured != nullptr && configured[0] != '\0'
+                         ? std::filesystem::path(configured)
+                         : std::filesystem::path("/bin/sh");
+            std::error_code error;
+            if (!std::filesystem::is_regular_file(shell_, error)) {
+                shell_ = "/bin/sh";
+            }
+
+            std::string pattern =
+                (std::filesystem::temp_directory_path(error) /
+                 "microcodex-shell-snapshot.XXXXXX")
+                    .string();
+            if (error) return;
+            std::vector<char> writable(pattern.begin(), pattern.end());
+            writable.push_back('\0');
+            const int descriptor = mkstemp(writable.data());
+            if (descriptor == -1) return;
+            close(descriptor);
+            snapshot_ = writable.data();
+
+            const std::string snapshot_path = shellSingleQuote(snapshot_.string());
+            const std::string script =
+                shellRcPrefix(shell_) +
+                "unset PWD OLDPWD; export -p > '" + snapshot_path + "'";
+            try {
+                const auto captured = runProcess(
+                    {shell_.string(), "-lc", script}, stop_token,
+                    std::chrono::steady_clock::now() + std::chrono::seconds(10));
+                if (captured.error_code == 0 &&
+                    std::filesystem::file_size(snapshot_, error) != 0 && !error) {
+                    valid_snapshot_ = true;
+                    return;
+                }
+            } catch (...) {
+                // Shell startup is best-effort. The fallback below still uses
+                // the user's login shell and sources its interactive rc file.
+            }
+            std::filesystem::remove(snapshot_, error);
+            snapshot_.clear();
+        }
+
+        UserShellContext(const UserShellContext &) = delete;
+        UserShellContext &operator=(const UserShellContext &) = delete;
+
+        ~UserShellContext() {
+            if (!snapshot_.empty()) {
+                std::error_code error;
+                std::filesystem::remove(snapshot_, error);
+            }
+        }
+
+        std::vector<std::string> command(const std::string_view script) const {
+            if (valid_snapshot_) {
+                const std::string snapshot_path = shellSingleQuote(snapshot_.string());
+                return {
+                    shell_.string(),
+                    "-c",
+                    "if . '" + snapshot_path + "' >/dev/null 2>&1; then :; fi\n\n" +
+                        std::string(script),
+                };
+            }
+            return {
+                shell_.string(),
+                "-lc",
+                shellRcPrefix(shell_) + std::string(script),
+            };
+        }
+
+    private:
+        std::filesystem::path shell_;
+        std::filesystem::path snapshot_;
+        bool valid_snapshot_ = false;
+    };
+
+    const UserShellContext &userShellContext(const std::stop_token stop_token) {
+        // Static initialization is thread-safe. Passing the first caller's stop
+        // token keeps the one-time snapshot capture interruptible as well.
+        static const UserShellContext context(stop_token);
+        return context;
     }
 
 } // namespace
@@ -280,7 +338,10 @@ namespace microcodex {
 
     std::expected<BashCommandResult, std::string> bash(const std::string &cmd, const std::stop_token stop_token) {
         try {
-            BashCommandResult result = runProcess(cmd, stop_token);
+            if (cmd.empty()) {
+                return std::unexpected("command must not be empty");
+            }
+            BashCommandResult result = runProcess(userShellContext(stop_token).command(cmd), stop_token);
             if (stop_token.stop_requested()) {
                 return std::unexpected("Command interrupted");
             }

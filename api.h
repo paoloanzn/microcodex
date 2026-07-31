@@ -110,7 +110,7 @@ namespace microcodex {
 
         std::expected<CodexApiResponse, std::string> requestWithToolExecution(std::stop_token stop_token, std::string_view turn_id, std::size_t &turn_start);
         std::expected<CodexApiResponse, std::string> request(std::stop_token stop_token, std::string_view turn_id);
-        std::expected<ModelResponse, std::string> performRequest(std::string request_body, std::stop_token stop_token, std::string_view turn_id, bool emit_events) const;
+        std::expected<ModelResponse, std::string> performRequest(std::string request_body, std::stop_token stop_token, std::string_view turn_id, bool emit_events, ModelResponse *partial_response = nullptr) const;
         std::expected<std::string, std::string> requestSummary(std::span<const std::string> items, std::stop_token stop_token);
         std::expected<void, std::string> compactContext(std::stop_token stop_token, std::size_t &protected_start, bool force);
         std::expected<std::vector<ToolExecutionResult>, std::string> executeToolCalls(std::span<const CodexToolCall> calls, std::stop_token stop_token, std::string_view turn_id) const;

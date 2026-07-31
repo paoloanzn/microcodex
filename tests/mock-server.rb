@@ -107,6 +107,57 @@ def validate_scenario!(scenario, request_number, payload)
                                          "output" => "Edited edit-target.txt"} },
              "second request did not contain the edit result")
     end
+  when "tool-shell-env"
+    validate_coding_tools!(payload)
+    if request_number.zero?
+      assert(input_text(payload) == "Read the shell environment",
+             "shell environment scenario did not receive the prompt")
+    else
+      output = payload.fetch("input").find do |item|
+        item["type"] == "function_call_output" && item["call_id"] == "call_shell_env"
+      end
+      assert(output, "shell environment request did not contain a tool output")
+      parsed = JSON.parse(output.fetch("output"))
+      assert(parsed == {"stdout" => "loaded-from-bashrc", "stderr" => "", "exit_code" => 0},
+             "shell tool did not restore the user's bashrc environment")
+    end
+  when "interrupt-output"
+    validate_coding_tools!(payload)
+    if request_number.zero?
+      assert(input_text(payload) == "Start interrupt test",
+             "interruption scenario did not receive its first prompt")
+    else
+      input = payload.fetch("input")
+      assert(input.any? { |item| item["role"] == "assistant" &&
+                                item.dig("content", 0, "text") == "Partial answer" },
+             "continued request lost partial assistant output")
+      assert(input.any? { |item| item["role"] == "user" &&
+                                item.dig("content", 0, "text")&.include?("<turn_aborted>") },
+             "continued request did not contain the interrupted-turn marker")
+      assert(input.last.dig("content", 0, "text") == "continue",
+             "continued request did not append the follow-up prompt")
+    end
+  when "interrupt-tool"
+    validate_coding_tools!(payload)
+    if request_number.zero?
+      assert(input_text(payload) == "Start interrupted tool test",
+             "tool interruption scenario did not receive its first prompt")
+    else
+      input = payload.fetch("input")
+      assert(input.any? { |item| item["type"] == "function_call" &&
+                                item["call_id"] == "call_sleep" },
+             "continued request lost the interrupted function call")
+      output = input.find do |item|
+        item["type"] == "function_call_output" && item["call_id"] == "call_sleep"
+      end
+      assert(output && output["output"].include?("interrupted"),
+             "continued request did not pair the function call with an interruption output")
+      assert(input.any? { |item| item["role"] == "user" &&
+                                item.dig("content", 0, "text")&.include?("<turn_aborted>") },
+             "tool interruption did not contain the interrupted-turn marker")
+      assert(input.last.dig("content", 0, "text") == "continue",
+             "tool interruption did not append the follow-up prompt")
+    end
   when "conversation-first"
     validate_coding_tools!(payload)
     assert(input_text(payload) == "Remember alpha",
@@ -223,6 +274,24 @@ def edit_call_response
   )
 end
 
+def shell_env_call_response
+  sse(
+    {type: "response.output_item.done",
+     item: {type: "function_call", call_id: "call_shell_env", name: "bash",
+            arguments: JSON.generate(command: "printf '%s' \"$MICROCODEX_RC_VALUE\"")}},
+    completed
+  )
+end
+
+def sleep_call_response
+  sse(
+    {type: "response.output_item.done",
+     item: {type: "function_call", call_id: "call_sleep", name: "bash",
+            arguments: JSON.generate(command: "sleep 30")}},
+    completed
+  )
+end
+
 def response_for(scenario, request_number)
   case scenario
   when "text" then [200, "OK", "text/event-stream", text_response]
@@ -235,6 +304,14 @@ def response_for(scenario, request_number)
   when "tool-edit"
     [200, "OK", "text/event-stream",
      request_number.zero? ? edit_call_response : message_response("Edited edit-target.txt")]
+  when "tool-shell-env"
+    [200, "OK", "text/event-stream",
+     request_number.zero? ? shell_env_call_response : message_response("Shell environment loaded")]
+  when "interrupt-output"
+    [200, "OK", "text/event-stream", message_response("Continued partial answer")]
+  when "interrupt-tool"
+    [200, "OK", "text/event-stream",
+     request_number.zero? ? sleep_call_response : message_response("Continued after tool interruption")]
   when "conversation-first"
     [200, "OK", "text/event-stream", message_response("Alpha stored")]
   when "conversation-resume"
@@ -294,7 +371,7 @@ abort "usage: mock-server.rb SCENARIO PORT_FILE REQUEST_DIR" unless ARGV.length 
 scenario, port_file, request_directory = ARGV
 expected_requests = if scenario == "context-error-retry"
                       3
-                    elsif %w[tool-write tool-edit compaction-resume].include?(scenario)
+                    elsif %w[tool-write tool-edit tool-shell-env compaction-resume interrupt-output interrupt-tool].include?(scenario)
                       2
                     else
                       1
@@ -325,7 +402,32 @@ while request_number < expected_requests
                     "#{request_line}\r\n#{headers.inspect}\r\n\r\n#{body}")
       validate_common!(request_line, headers, payload)
       validate_scenario!(scenario, request_number, payload)
-      send_response(socket, *response_for(scenario, request_number))
+      if scenario == "interrupt-output" && request_number.zero?
+        socket.write(
+          "HTTP/1.1 200 OK\r\n" \
+          "Content-Type: text/event-stream\r\n" \
+          "Connection: close\r\n\r\n" \
+          "#{sse(type: "response.output_text.delta", delta: "Partial answer")}"
+        )
+        sleep 0.1
+        File.write(File.join(request_directory, "interrupt-ready"), "ready\n")
+        begin
+          loop do
+            sleep 0.05
+            socket.write(": waiting\n\n")
+          end
+        rescue Errno::EPIPE, Errno::ECONNRESET
+          File.write(File.join(request_directory, "interrupt-observed"), "observed\n")
+        end
+      else
+        send_response(socket, *response_for(scenario, request_number))
+        if scenario == "interrupt-tool" && request_number.zero?
+          sleep 0.1
+          File.write(File.join(request_directory, "interrupt-ready"), "ready\n")
+        elsif %w[interrupt-output interrupt-tool].include?(scenario) && request_number == 1
+          File.write(File.join(request_directory, "continued"), "continued\n")
+        end
+      end
       request_number += 1
     end
   rescue StandardError => error

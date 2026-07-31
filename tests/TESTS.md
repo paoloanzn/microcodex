@@ -42,6 +42,10 @@ text, an HTTP error, and a complete two-request tool loop in which the model
 asks the real `write` tool to change the test working directory. This verifies
 the CLI, credential loading, request construction, SSE handling, tool
 execution, transcript replay, and final output together.
+The tool cases also verify that bash sees exports loaded from the user's shell
+startup file. PTY-driven interruption cases exercise the real termbox UI and
+prove that both partial assistant output and interrupted function calls are
+replayed when the user sends `continue`.
 Conversation scenarios also cover durable JSONL turns, listing and walking
 saved history, exact replay after resume, compaction checkpoints, and the
 invariant that compaction never removes the durable transcript.

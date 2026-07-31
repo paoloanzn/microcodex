@@ -34,6 +34,10 @@ namespace {
     using microcodex::json::requiredJsonString;
 
     constexpr std::string_view interrupted_message = "Codex turn was interrupted";
+    constexpr std::string_view interrupted_guidance =
+        "<turn_aborted>\n"
+        "The previous turn was interrupted on purpose. Any running commands may still be running in the background. If any tools or commands were aborted, they may have partially executed.\n"
+        "</turn_aborted>";
 
     std::string makeUuid() {
         std::array<unsigned char, 16> bytes{};
@@ -504,18 +508,37 @@ namespace microcodex {
 
         auto response = requestWithToolExecution(turn_stop.get_token(), turn_id, turn_start);
         if (!response) {
-            // The API transcript is append-only during a turn. Truncating to
-            // this checkpoint restores the last complete conversation even if
-            // the failure happened after several successful tool rounds.
-            input_items_.resize(turn_start);
-            turn_number_ = previous_turn;
-            turn_state_ = previous_turn_state;
-
             if (turn_stop.stop_requested()) {
+                // Keep every complete response item, partial assistant text,
+                // function call, and tool output collected before cancellation.
+                // The marker is model-visible context for a later "continue",
+                // matching Codex's interrupted-turn rollout behavior.
+                input_items_.push_back(userMessageItem(interrupted_guidance));
+                if (conversation_file_) {
+                    const auto turn_items = std::span<const std::string>(input_items_).subspan(
+                        turn_start, input_items_.size() - turn_start);
+                    auto saved = conversation_file_->appendTurn(turn_number_, turn_id, turn_items);
+                    if (!saved) {
+                        input_items_.resize(turn_start);
+                        turn_number_ = previous_turn;
+                        turn_state_ = previous_turn_state;
+                        emitEvent({.type = CodexEventType::Error, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = saved.error(), .edit = {}, .succeeded = false});
+                        return std::unexpected(saved.error());
+                    }
+                }
+                completed_turns_.push_back({
+                    .number = turn_number_,
+                    .end = input_items_.size(),
+                });
                 emitEvent({.type = CodexEventType::TurnInterrupted, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = std::string(interrupted_message), .edit = {}});
                 return std::unexpected(std::string(interrupted_message));
             }
 
+            // Non-cancellation failures remain transactional: restore the last
+            // terminal turn even after successful intermediate tool rounds.
+            input_items_.resize(turn_start);
+            turn_number_ = previous_turn;
+            turn_state_ = previous_turn_state;
             emitEvent({.type = CodexEventType::Error, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = response.error(), .edit = {}, .succeeded = false});
             return std::unexpected(response.error());
         }
@@ -828,15 +851,15 @@ namespace microcodex {
             if (!results) {
                 return std::unexpected(results.error());
             }
-            if (stop_token.stop_requested()) {
-                return std::unexpected(std::string(interrupted_message));
-            }
 
-            // Append the complete batch before the next request. No partial
-            // batch is ever exposed to the model, even when tools finish in a
-            // different order.
+            // Append the complete batch before observing cancellation. Function
+            // calls must stay paired with outputs, including explicit
+            // interruption outputs, so a later turn can safely continue.
             for (const ToolExecutionResult &result : *results) {
                 input_items_.push_back(toolOutputItem(result.output));
+            }
+            if (stop_token.stop_requested()) {
+                return std::unexpected(std::string(interrupted_message));
             }
             auto compacted = compactContext(stop_token, turn_start, false);
             if (!compacted) return std::unexpected(compacted.error());
@@ -849,8 +872,24 @@ namespace microcodex {
             return std::unexpected(request_body.error());
         }
 
-        auto sampled = performRequest(std::move(*request_body), stop_token, turn_id, true);
-        if (!sampled) return std::unexpected(sampled.error());
+        ModelResponse partial;
+        auto sampled = performRequest(std::move(*request_body), stop_token, turn_id, true, &partial);
+        if (!sampled) {
+            if (stop_token.stop_requested()) {
+                turn_state_ = std::move(partial.turn_state);
+                reported_input_tokens_ = partial.response.input_tokens;
+                bool has_assistant_message = false;
+                for (std::string &item : partial.output_items) {
+                    auto type = responseItemType(item);
+                    if (type && *type == "message") has_assistant_message = true;
+                    input_items_.push_back(std::move(item));
+                }
+                if (!partial.response.text.empty() && !has_assistant_message) {
+                    input_items_.push_back(assistantMessageItem(partial.response.text));
+                }
+            }
+            return std::unexpected(sampled.error());
+        }
 
         turn_state_ = std::move(sampled->turn_state);
         reported_input_tokens_ = sampled->response.input_tokens;
@@ -860,7 +899,7 @@ namespace microcodex {
         return std::move(sampled->response);
     }
 
-    std::expected<CodexApi::ModelResponse, std::string> CodexApi::performRequest(std::string request_body, const std::stop_token stop_token, const std::string_view turn_id, const bool emit_events) const {
+    std::expected<CodexApi::ModelResponse, std::string> CodexApi::performRequest(std::string request_body, const std::stop_token stop_token, const std::string_view turn_id, const bool emit_events, ModelResponse *partial_response) const {
         std::vector<std::string> headers{
             "Authorization: Bearer " + config_.access_token,
             "Content-Type: application/json",
@@ -888,7 +927,16 @@ namespace microcodex {
             .stop_token = stop_token,
         }, receiveResponseBody, receiveResponseHeader, &state);
         if (!response) {
-            if (stop_token.stop_requested()) return std::unexpected(std::string(interrupted_message));
+            if (stop_token.stop_requested()) {
+                if (partial_response != nullptr) {
+                    *partial_response = ModelResponse{
+                        .response = std::move(state.response),
+                        .output_items = std::move(state.output_items),
+                        .turn_state = std::move(state.turn_state),
+                    };
+                }
+                return std::unexpected(std::string(interrupted_message));
+            }
             return std::unexpected(response.error());
         }
         if (response->status < 200 || response->status >= 300) return std::unexpected(responseErrorMessage(response->body, response->status));

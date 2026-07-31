@@ -28,6 +28,7 @@ namespace microcodex {
     };
 
     std::string userMessageItem(std::string_view message);
+    std::string assistantMessageItem(std::string_view message);
     std::string toolOutputItem(const CodexToolOutput &output);
 
     std::expected<std::string, std::string> responseItemType(std::string_view item);

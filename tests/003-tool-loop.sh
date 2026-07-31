@@ -39,3 +39,18 @@ line two changed
 line three
 STDOUT
 STDERR
+
+shell_home=$TEST_WORKDIR/shell-home
+mkdir -p "$shell_home" || exit 1
+printf '%s\n' 'export MICROCODEX_RC_VALUE=loaded-from-bashrc' > "$shell_home/.bashrc" || exit 1
+
+expect_process "T3.5: bash restores exports from the user's interactive shell rc" 0 \
+    run_with_mock tool-shell-env env HOME="$shell_home" SHELL=/bin/bash \
+        CODEX_HOME="$tool_home" PATH="$TEST_BIN_DIR:$PATH" \
+        microcodex Read the shell environment <<'STDOUT' 3<<'STDERR'
+Shell environment loaded
+STDOUT
+
+[tool bash] {"command":"printf '%s' \"$MICROCODEX_RC_VALUE\""}
+[tool bash completed] {"stdout":"loaded-from-bashrc","stderr":"","exit_code":0}
+STDERR
