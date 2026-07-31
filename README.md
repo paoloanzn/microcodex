@@ -70,6 +70,11 @@ make
 
 The executable is written to `build/microcodex`. Run the test suite with `make test`.
 
+## Known bugs and issues
+
+- Text cannot currently be copied from the terminal while using MicroCodex.
+- Dangerous shell commands are not yet gated by a safe-command policy.
+
 ## Docs
 
 - [**CLI usage**](#using-microcodex-with-your-chatgpt-plan)
