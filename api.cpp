@@ -3,15 +3,20 @@
 
 #include "api.h"
 #include "json.h"
+#include "response-item.h"
 
 #include <curl/curl.h>
 
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <charconv>
+#include <chrono>
 #include <cstddef>
+#include <ctime>
 #include <exception>
 #include <expected>
+#include <filesystem>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -27,7 +32,6 @@ namespace {
 
     using microcodex::json::appendJsonString;
     using microcodex::json::findJsonMember;
-    using microcodex::json::jsonArrayElements;
     using microcodex::json::jsonStringMember;
     using microcodex::json::requiredJsonString;
 
@@ -59,42 +63,47 @@ namespace {
         return value.find_first_of("\r\n") != std::string_view::npos;
     }
 
-    std::expected<std::string, std::string> assistantMessageText(const std::string_view item) {
-        auto type = requiredJsonString(item, "type");
-        if (!type) {
-            return std::unexpected(type.error());
-        }
-        if (*type != "message") {
-            return std::string{};
-        }
+    std::optional<std::size_t> unsignedJsonValue(const std::string_view value) {
+        std::size_t result = 0;
+        const char *begin = value.data();
+        const char *end = begin + value.size();
+        const auto [parsed_end, error] = std::from_chars(begin, end, result);
+        if (error != std::errc{} || parsed_end != end) return std::nullopt;
+        return result;
+    }
 
-        auto content = findJsonMember(item, "content");
-        if (!content) {
-            return std::unexpected(content.error());
-        }
-        if (!*content) {
-            return std::unexpected("Response message has no content");
-        }
-        auto parts = jsonArrayElements(**content);
-        if (!parts) {
-            return std::unexpected(parts.error());
-        }
+    std::string currentTimestamp() {
+        const std::time_t now = std::chrono::system_clock::to_time_t(
+            std::chrono::system_clock::now());
+        std::tm utc{};
+#ifdef _WIN32
+        gmtime_s(&utc, &now);
+#else
+        gmtime_r(&now, &utc);
+#endif
+        char timestamp[32]{};
+        std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ", &utc);
+        return timestamp;
+    }
 
-        std::string text;
-        for (const std::string_view part : *parts) {
-            auto part_type = requiredJsonString(part, "type");
-            if (!part_type) {
-                return std::unexpected(part_type.error());
-            }
-            if (*part_type == "output_text") {
-                auto part_text = requiredJsonString(part, "text");
-                if (!part_text) {
-                    return std::unexpected(part_text.error());
-                }
-                text += *part_text;
-            }
+    std::string boundedToolOutput(std::string output, const std::size_t maximum_bytes) {
+        if (maximum_bytes == 0 || output.size() <= maximum_bytes) return output;
+
+        const std::string marker = "\n... [tool output truncated from " +
+                                   std::to_string(output.size()) + " bytes] ...\n";
+        if (marker.size() >= maximum_bytes) {
+            return marker.substr(0, maximum_bytes);
         }
-        return text;
+        const std::size_t remaining = maximum_bytes - marker.size();
+        const std::size_t head = remaining / 2;
+        const std::size_t tail = remaining - head;
+        return output.substr(0, head) + marker + output.substr(output.size() - tail);
+    }
+
+    bool isContextLimitError(const std::string_view error) {
+        return error.find("context window") != std::string_view::npos ||
+               error.find("context_length") != std::string_view::npos ||
+               error.find("maximum context") != std::string_view::npos;
     }
 
     struct StreamState {
@@ -173,11 +182,13 @@ namespace {
                 }
                 state.response.tool_calls.push_back({std::move(*call_id), std::move(*name), std::move(*arguments)});
             } else if (*item_type == "message") {
-                auto text = assistantMessageText(item_json);
-                if (!text) {
-                    return std::unexpected(text.error());
+                auto message = microcodex::responseMessage(item_json);
+                if (!message) {
+                    return std::unexpected(message.error());
                 }
-                state.fallback_text += *text;
+                if (*message) {
+                    state.fallback_text += (*message)->text;
+                }
             }
             return {};
         }
@@ -196,6 +207,14 @@ namespace {
             if (state.response.text.empty() && !state.fallback_text.empty()) {
                 state.response.text = state.fallback_text;
                 emitTextDelta(state, state.fallback_text);
+            }
+            auto usage = findJsonMember(**response, "usage");
+            if (usage && *usage) {
+                auto input_tokens = findJsonMember(**usage, "input_tokens");
+                if (input_tokens && *input_tokens) {
+                    state.response.input_tokens =
+                        unsignedJsonValue(**input_tokens).value_or(0);
+                }
             }
             state.completed = true;
             return {};
@@ -444,36 +463,81 @@ namespace {
         std::optional<std::stop_source> &stop_source_;
     };
 
-    std::string userMessageItem(const std::string_view message) {
-        std::string item = "{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":";
-        appendJsonString(item, message);
-        item += "}]}";
-        return item;
-    }
-
-    std::string toolOutputItem(const microcodex::CodexToolOutput &output) {
-        std::string item = "{\"type\":\"function_call_output\",\"call_id\":";
-        appendJsonString(item, output.call_id);
-        item += ",\"output\":";
-        appendJsonString(item, output.output);
-        item += '}';
-        return item;
-    }
-
 } // namespace
 
 namespace microcodex {
 
-    CodexApi::CodexApi(CodexApiConfig config) : config_(std::move(config)), installation_id_(makeUuid()), session_id_(makeUuid()) {}
+    CodexApi::CodexApi(CodexApiConfig config)
+        : config_(std::move(config)),
+          compactor_(CompactionConfig{
+              .context_limit_tokens = config_.context_limit_tokens,
+              .compact_at_tokens = config_.compact_at_tokens,
+              .retained_context_tokens = config_.retained_context_tokens,
+          }),
+          installation_id_(makeUuid()),
+          session_id_(makeUuid()) {}
 
     CodexApi::CodexApi(CodexApiConfig config, CodexEventEmitter &events) : CodexApi(std::move(config)) {
         events_ = &events;
+    }
+
+    std::expected<void, std::string> CodexApi::initializeConversation() {
+        std::lock_guard lock(turn_mutex_);
+        if (conversation_initialized_) return {};
+        if (turn_running_) {
+            return std::unexpected("Cannot initialize a conversation while a turn is running");
+        }
+        if (!config_.persist_conversation) {
+            conversation_initialized_ = true;
+            return {};
+        }
+
+        if (config_.resume_conversation) {
+            auto file = ConversationFile::open(*config_.resume_conversation);
+            if (!file) return std::unexpected(file.error());
+            auto resumed = file->resume();
+            if (!resumed) return std::unexpected(resumed.error());
+
+            session_id_ = resumed->metadata.id;
+            input_items_ = std::move(resumed->input_items);
+            completed_turns_ = std::move(resumed->completed_turns);
+            has_summary_ = resumed->has_summary;
+            compaction_generation_ = resumed->compaction_generation;
+            turn_number_ = static_cast<std::size_t>(resumed->next_turn_number - 1);
+            conversation_file_.emplace(std::move(*file));
+            conversation_initialized_ = true;
+            return {};
+        }
+
+        auto directory = conversationDirectory();
+        if (!directory) return std::unexpected(directory.error());
+        std::error_code error;
+        const std::filesystem::path working_directory =
+            std::filesystem::current_path(error);
+        if (error) {
+            return std::unexpected("Could not determine the working directory: " +
+                                   error.message());
+        }
+        ConversationMetadata metadata{
+            .version = 1,
+            .id = session_id_,
+            .created_at = currentTimestamp(),
+            .working_directory = working_directory.string(),
+            .model = config_.model,
+        };
+        auto file = ConversationFile::create(*directory, metadata);
+        if (!file) return std::unexpected(file.error());
+        conversation_file_.emplace(std::move(*file));
+        conversation_initialized_ = true;
+        return {};
     }
 
     std::expected<CodexApiResponse, std::string> CodexApi::sendUserMessage(const std::string_view message) {
         if (message.empty()) {
             return std::unexpected("User message cannot be empty");
         }
+        auto initialized = initializeConversation();
+        if (!initialized) return std::unexpected(initialized.error());
 
         std::stop_source turn_stop;
         {
@@ -489,22 +553,37 @@ namespace microcodex {
         }
         RunningTurnGuard running_turn(turn_mutex_, turn_running_, active_turn_stop_);
 
-        const std::size_t previous_size = input_items_.size();
         const std::size_t previous_turn = turn_number_;
         const std::string previous_turn_state = turn_state_;
         const std::string turn_id = makeUuid();
+
+        std::size_t turn_start = input_items_.size();
+        auto compacted = compactContext(turn_stop.get_token(), turn_start, false);
+        if (!compacted) {
+            emitEvent({.type = CodexEventType::Error, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = compacted.error(), .succeeded = false});
+            return std::unexpected(compacted.error());
+        }
 
         turn_state_.clear();
         ++turn_number_;
         input_items_.push_back(userMessageItem(message));
         emitEvent({.type = CodexEventType::TurnStarted, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = {}});
 
-        auto response = requestWithToolExecution(turn_stop.get_token(), turn_id);
+        compacted = compactContext(turn_stop.get_token(), turn_start, false);
+        if (!compacted) {
+            input_items_.resize(turn_start);
+            turn_number_ = previous_turn;
+            turn_state_ = previous_turn_state;
+            emitEvent({.type = CodexEventType::Error, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = compacted.error(), .succeeded = false});
+            return std::unexpected(compacted.error());
+        }
+
+        auto response = requestWithToolExecution(turn_stop.get_token(), turn_id, turn_start);
         if (!response) {
             // The API transcript is append-only during a turn. Truncating to
             // this checkpoint restores the last complete conversation even if
             // the failure happened after several successful tool rounds.
-            input_items_.resize(previous_size);
+            input_items_.resize(turn_start);
             turn_number_ = previous_turn;
             turn_state_ = previous_turn_state;
 
@@ -516,6 +595,23 @@ namespace microcodex {
             emitEvent({.type = CodexEventType::Error, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = response.error(), .succeeded = false});
             return std::unexpected(response.error());
         }
+
+        if (conversation_file_) {
+            const auto turn_items = std::span<const std::string>(input_items_).subspan(
+                turn_start, input_items_.size() - turn_start);
+            auto saved = conversation_file_->appendTurn(turn_number_, turn_id, turn_items);
+            if (!saved) {
+                input_items_.resize(turn_start);
+                turn_number_ = previous_turn;
+                turn_state_ = previous_turn_state;
+                emitEvent({.type = CodexEventType::Error, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = saved.error(), .succeeded = false});
+                return std::unexpected(saved.error());
+            }
+        }
+        completed_turns_.push_back({
+            .number = turn_number_,
+            .end = input_items_.size(),
+        });
 
         emitEvent({.type = CodexEventType::TurnCompleted, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = response->text});
         return response;
@@ -538,6 +634,13 @@ namespace microcodex {
         }
 
         input_items_.clear();
+        completed_turns_.clear();
+        conversation_file_.reset();
+        conversation_initialized_ = false;
+        config_.resume_conversation.reset();
+        has_summary_ = false;
+        compaction_generation_ = 0;
+        reported_input_tokens_ = 0;
         session_id_ = makeUuid();
         turn_state_.clear();
         turn_number_ = 0;
@@ -557,7 +660,21 @@ namespace microcodex {
         return turn_running_;
     }
 
-    std::expected<std::string, std::string> CodexApi::buildRequestBody() const {
+    std::expected<std::vector<SavedTurn>, std::string> CodexApi::readHistoryBefore(const std::size_t cursor, const std::size_t maximum_bytes) const {
+        std::lock_guard lock(turn_mutex_);
+        if (turn_running_) {
+            return std::unexpected("Cannot read saved history while a turn is running");
+        }
+        if (!conversation_file_) return std::vector<SavedTurn>{};
+        return conversation_file_->readTurnsBefore(cursor, maximum_bytes);
+    }
+
+    std::size_t CodexApi::savedTurnCount() const {
+        std::lock_guard lock(turn_mutex_);
+        return conversation_file_ ? conversation_file_->turnCount() : 0;
+    }
+
+    std::expected<std::string, std::string> CodexApi::buildRequestBody(const std::span<const std::string> items, const std::string_view instructions, const bool include_tools, const std::string_view final_item) const {
         if (config_.access_token.empty()) {
             return std::unexpected("Codex access token cannot be empty");
         }
@@ -582,45 +699,57 @@ namespace microcodex {
         if (containsNewline(config_.access_token) || containsNewline(config_.account_id)) {
             return std::unexpected("Credentials cannot contain a newline");
         }
-        if (input_items_.empty()) {
+        if (items.empty() && final_item.empty()) {
             return std::unexpected("Conversation has no input");
         }
 
         std::unordered_set<std::string> tool_names;
-        for (const auto &tool : config_.tools) {
-            if (tool == nullptr) {
-                return std::unexpected("Tools cannot contain null entries");
-            }
-            if (tool->name().empty()) {
-                return std::unexpected("Tool names cannot be empty");
-            }
-            if (!tool_names.emplace(tool->name()).second) {
-                return std::unexpected("Duplicate tool name '" + std::string(tool->name()) + "'");
+        if (include_tools) {
+            for (const auto &tool : config_.tools) {
+                if (tool == nullptr) {
+                    return std::unexpected("Tools cannot contain null entries");
+                }
+                if (tool->name().empty()) {
+                    return std::unexpected("Tool names cannot be empty");
+                }
+                if (!tool_names.emplace(tool->name()).second) {
+                    return std::unexpected("Duplicate tool name '" + std::string(tool->name()) + "'");
+                }
             }
         }
 
-        const std::string window_id = session_id_ + ":" + std::to_string(turn_number_ - 1);
+        const std::string window_id =
+            session_id_ + ":" + std::to_string(compaction_generation_);
         std::string body = "{\"model\":";
         appendJsonString(body, config_.model);
         body += ",\"instructions\":";
-        appendJsonString(body, config_.instructions);
+        appendJsonString(body, instructions);
         body += ",\"input\":[";
-        for (std::size_t index = 0; index < input_items_.size(); ++index) {
+        for (std::size_t index = 0; index < items.size(); ++index) {
             if (index != 0) {
                 body += ',';
             }
-            body += input_items_[index];
+            body += items[index];
+        }
+        if (!final_item.empty()) {
+            if (!items.empty()) body += ',';
+            body += final_item;
         }
         body += R"(],"tools":[)";
-        for (std::size_t index = 0; index < config_.tools.size(); ++index) {
-            if (index != 0) {
-                body += ',';
+        if (include_tools) {
+            for (std::size_t index = 0; index < config_.tools.size(); ++index) {
+                if (index != 0) {
+                    body += ',';
+                }
+                body += config_.tools[index]->toJsonString();
             }
-            body += config_.tools[index]->toJsonString();
         }
         body += ']';
 
-        body += ",\"tool_choice\":\"auto\",\"parallel_tool_calls\":true,\"reasoning\":{\"effort\":";
+        if (include_tools) {
+            body += ",\"tool_choice\":\"auto\",\"parallel_tool_calls\":true";
+        }
+        body += ",\"reasoning\":{\"effort\":";
         appendJsonString(body, config_.reasoning_effort);
         body += "},\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"prompt_cache_key\":";
         appendJsonString(body, session_id_);
@@ -654,7 +783,10 @@ namespace microcodex {
             if (!result) {
                 return {{call.call_id, "Error: " + result.error()}, false};
             }
-            return {{call.call_id, std::move(*result)}, true};
+            return {{call.call_id,
+                     boundedToolOutput(std::move(*result),
+                                       config_.maximum_tool_output_bytes)},
+                    true};
         } catch (const std::exception &error) {
             return {{call.call_id, std::string("Error: Tool threw an exception: ") + error.what()}, false};
         } catch (...) {
@@ -732,9 +864,10 @@ namespace microcodex {
         return results;
     }
 
-    std::expected<CodexApiResponse, std::string> CodexApi::requestWithToolExecution(const std::stop_token stop_token, const std::string_view turn_id) {
+    std::expected<CodexApiResponse, std::string> CodexApi::requestWithToolExecution(const std::stop_token stop_token, const std::string_view turn_id, std::size_t &turn_start) {
         CodexApiResponse complete_response;
         std::size_t tool_rounds = 0;
+        bool retried_context_limit = false;
 
         while (true) {
             if (stop_token.stop_requested()) {
@@ -743,10 +876,17 @@ namespace microcodex {
 
             auto response = request(stop_token, turn_id);
             if (!response) {
+                if (!retried_context_limit && isContextLimitError(response.error())) {
+                    auto compacted = compactContext(stop_token, turn_start, true);
+                    if (!compacted) return std::unexpected(compacted.error());
+                    retried_context_limit = true;
+                    continue;
+                }
                 return std::unexpected(response.error());
             }
 
             complete_response.text += response->text;
+            complete_response.input_tokens = response->input_tokens;
             complete_response.tool_calls.insert(complete_response.tool_calls.end(), response->tool_calls.begin(), response->tool_calls.end());
             if (response->tool_calls.empty()) {
                 return complete_response;
@@ -771,14 +911,29 @@ namespace microcodex {
             for (const ToolExecutionResult &result : *results) {
                 input_items_.push_back(toolOutputItem(result.output));
             }
+            auto compacted = compactContext(stop_token, turn_start, false);
+            if (!compacted) return std::unexpected(compacted.error());
         }
     }
 
     std::expected<CodexApiResponse, std::string> CodexApi::request(const std::stop_token stop_token, const std::string_view turn_id) {
-        auto request_body = buildRequestBody();
+        auto request_body = buildRequestBody(input_items_, config_.instructions, true);
         if (!request_body) {
             return std::unexpected(request_body.error());
         }
+
+        auto sampled = performRequest(std::move(*request_body), stop_token, turn_id, true);
+        if (!sampled) return std::unexpected(sampled.error());
+
+        turn_state_ = std::move(sampled->turn_state);
+        reported_input_tokens_ = sampled->response.input_tokens;
+        for (std::string &item : sampled->output_items) {
+            input_items_.push_back(std::move(item));
+        }
+        return std::move(sampled->response);
+    }
+
+    std::expected<CodexApi::ModelResponse, std::string> CodexApi::performRequest(std::string request_body, const std::stop_token stop_token, const std::string_view turn_id, const bool emit_events) const {
 
         static const CURLcode curl_initialization = curl_global_init(CURL_GLOBAL_DEFAULT);
         if (curl_initialization != CURLE_OK) {
@@ -800,13 +955,14 @@ namespace microcodex {
             !headers.append("thread-id: " + session_id_) ||
             !headers.append("x-client-request-id: " + session_id_) ||
             !headers.append("x-codex-window-id: " + session_id_ + ":" + std::to_string(turn_number_ - 1)) ||
-            (!turn_state_.empty() && !headers.append("x-codex-turn-state: " + turn_state_))) {
+            (emit_events && !turn_state_.empty() &&
+             !headers.append("x-codex-turn-state: " + turn_state_))) {
             return std::unexpected("Could not allocate HTTP headers");
         }
 
         StreamState state;
         state.turn_id = std::string(turn_id);
-        state.events = events_;
+        state.events = emit_events ? events_ : nullptr;
         state.stop_token = stop_token;
         std::array<char, CURL_ERROR_SIZE> curl_error{};
 
@@ -820,8 +976,8 @@ namespace microcodex {
         if (!setOption(CURLOPT_URL, config_.endpoint.c_str()) ||
             !setOption(CURLOPT_HTTPHEADER, headers.get()) ||
             !setOption(CURLOPT_POST, 1L) ||
-            !setOption(CURLOPT_POSTFIELDS, request_body->data()) ||
-            !setOption(CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(request_body->size())) ||
+            !setOption(CURLOPT_POSTFIELDS, request_body.data()) ||
+            !setOption(CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(request_body.size())) ||
             !setOption(CURLOPT_WRITEFUNCTION, &receiveBody) ||
             !setOption(CURLOPT_WRITEDATA, &state) ||
             !setOption(CURLOPT_HEADERFUNCTION, &receiveHeader) ||
@@ -864,11 +1020,71 @@ namespace microcodex {
             return std::unexpected("Codex stream closed before response.completed");
         }
 
-        turn_state_ = std::move(state.turn_state);
-        for (std::string &item : state.output_items) {
-            input_items_.push_back(std::move(item));
+        return ModelResponse{
+            .response = std::move(state.response),
+            .output_items = std::move(state.output_items),
+            .turn_state = std::move(state.turn_state),
+        };
+    }
+
+    std::expected<std::string, std::string> CodexApi::requestSummary(const std::span<const std::string> items, const std::stop_token stop_token) {
+        const std::string prompt = userMessageItem("Produce the conversation summary now.");
+        auto body = buildRequestBody(items, compactor_.summaryInstructions(), false, prompt);
+        if (!body) return std::unexpected(body.error());
+
+        auto sampled = performRequest(std::move(*body), stop_token, makeUuid(), false);
+        if (!sampled) return std::unexpected(sampled.error());
+        if (sampled->response.text.empty()) {
+            return std::unexpected("Compaction returned no summary text");
         }
-        return std::move(state.response);
+        return std::move(sampled->response.text);
+    }
+
+    std::expected<void, std::string> CodexApi::compactContext(const std::stop_token stop_token, std::size_t &protected_start, const bool force) {
+        const ContextUsage usage{
+            .reported_input_tokens = reported_input_tokens_,
+            .estimated_tokens = estimateContextTokens(input_items_),
+        };
+        if (!force && !compactor_.needed(usage)) return {};
+
+        const ContextView view{
+            .items = input_items_,
+            .completed_turns = completed_turns_,
+            .protected_start = protected_start,
+            .has_summary = has_summary_,
+            .generation = compaction_generation_,
+        };
+        auto plan = compactor_.plan(view, !force);
+        if (!plan) {
+            // Automatic checks can run again immediately after a successful
+            // compaction. If no complete prefix can be reduced further, let the
+            // request proceed; a real context-limit response will retry with force.
+            if (!force) return {};
+            return std::unexpected("Could not compact context: " + plan.error());
+        }
+
+        auto summary = requestSummary(
+            std::span<const std::string>(input_items_).first(plan->summary_end),
+            stop_token);
+        if (!summary) return std::unexpected(summary.error());
+
+        auto prepared = compactor_.prepare(view, *plan, std::move(*summary));
+        if (!prepared) return std::unexpected(prepared.error());
+
+        if (conversation_file_) {
+            auto saved = conversation_file_->appendCheckpoint(prepared->checkpoint);
+            if (!saved) return std::unexpected(saved.error());
+        }
+
+        const std::size_t protected_items = input_items_.size() - protected_start;
+        input_items_ = std::move(prepared->input_items);
+        completed_turns_ = std::move(prepared->completed_turns);
+        protected_start = input_items_.size() - protected_items;
+        has_summary_ = true;
+        compaction_generation_ = prepared->checkpoint.generation;
+        reported_input_tokens_ = 0;
+        turn_state_.clear();
+        return {};
     }
 
     void CodexApi::emitEvent(CodexEvent event) const noexcept {

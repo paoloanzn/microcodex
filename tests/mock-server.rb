@@ -44,6 +44,9 @@ def validate_common!(request_line, headers, payload)
          "request did not ask for an event stream")
   assert(payload["stream"] == true, "request did not enable streaming")
 
+end
+
+def validate_coding_tools!(payload)
   tool_names = payload.fetch("tools").map { |tool| tool["name"] }
   assert((%w[read write bash] - tool_names).empty?,
          "request did not advertise the coding tools")
@@ -56,12 +59,14 @@ end
 def validate_scenario!(scenario, request_number, payload)
   case scenario
   when "text"
+    validate_coding_tools!(payload)
     assert(payload["model"] == "test-model", "CLI model option was not sent")
     assert(input_text(payload) == "Say hello from two arguments",
            "CLI prompt arguments were not joined and sent")
   when "http-error"
-    nil
+    validate_coding_tools!(payload)
   when "tool-write"
+    validate_coding_tools!(payload)
     if request_number.zero?
       assert(input_text(payload) == "Create the requested file",
              "tool scenario did not receive the user prompt")
@@ -75,6 +80,65 @@ def validate_scenario!(scenario, request_number, payload)
                                          "output" => "Created result.txt"} },
              "second request did not contain the real tool output")
     end
+  when "conversation-first"
+    validate_coding_tools!(payload)
+    assert(input_text(payload) == "Remember alpha",
+           "saved conversation did not receive its first prompt")
+  when "conversation-resume"
+    validate_coding_tools!(payload)
+    assert(payload["model"] == "test-model", "resume did not restore the saved model")
+    input = payload.fetch("input")
+    assert(input.any? { |item| item.dig("content", 0, "text") == "Remember alpha" },
+           "resumed request did not replay the saved user message")
+    assert(input.any? { |item| item.dig("content", 0, "text") == "Alpha stored" },
+           "resumed request did not replay the saved assistant message")
+    assert(input.last.dig("content", 0, "text") == "Recall beta",
+           "resumed request did not append the new user message")
+  when "compaction-seed"
+    validate_coding_tools!(payload)
+    assert(input_text(payload) == "Seed compactable context",
+           "compaction seed did not receive its prompt")
+  when "context-error-seed"
+    validate_coding_tools!(payload)
+    assert(input_text(payload) == "Seed context error recovery",
+           "context-error seed did not receive its prompt")
+  when "compaction-resume"
+    assert(payload["model"] == "test-model", "compaction resume did not restore the saved model")
+    if request_number.zero?
+      assert(payload.fetch("tools").empty?, "summary request unexpectedly advertised tools")
+      assert(payload.fetch("instructions").include?("Summarize the conversation"),
+             "summary request did not use compaction instructions")
+      assert(payload.fetch("input").any? do |item|
+               item.dig("content", 0, "text") == "Seed compactable context"
+             end, "summary request did not contain the old conversation")
+    else
+      validate_coding_tools!(payload)
+      input = payload.fetch("input")
+      summary = input.first.dig("content", 0, "text")
+      assert(summary.include?("<conversation_summary>"),
+             "post-compaction request did not begin with a summary")
+      assert(summary.include?("The seed established compactable state."),
+             "post-compaction request did not contain the generated summary")
+      assert(input.none? { |item| item.dig("content", 0, "text") == "Seed response" },
+             "post-compaction request retained summarized assistant history")
+      assert(input.last.dig("content", 0, "text") == "Continue after compaction",
+             "post-compaction request did not retain the active user message")
+    end
+  when "context-error-retry"
+    if request_number == 1
+      assert(payload.fetch("tools").empty?, "context-error summary advertised tools")
+      assert(payload.fetch("instructions").include?("Summarize the conversation"),
+             "context-error retry did not request a summary")
+    else
+      validate_coding_tools!(payload)
+      input = payload.fetch("input")
+      assert(input.last.dig("content", 0, "text") == "Recover from context error",
+             "context-error retry lost the active user message")
+      if request_number == 2
+        assert(input.first.dig("content", 0, "text").include?("<conversation_summary>"),
+               "context-error retry did not install the summary")
+      end
+    end
   else
     raise "unknown mock scenario #{scenario.inspect}"
   end
@@ -84,19 +148,22 @@ def sse(*events)
   events.map { |event| "data: #{JSON.generate(event)}\n\n" }.join
 end
 
-def completed
-  {type: "response.completed", response: {}}
+def completed(input_tokens: 10)
+  {type: "response.completed", response: {usage: {input_tokens: input_tokens}}}
+end
+
+def message_response(text, input_tokens: 10)
+  sse(
+    {type: "response.output_text.delta", delta: text},
+    {type: "response.output_item.done",
+     item: {type: "message", role: "assistant",
+            content: [{type: "output_text", text: text}]}},
+    completed(input_tokens: input_tokens)
+  )
 end
 
 def text_response
-  sse(
-    {type: "response.output_text.delta", delta: "Hello"},
-    {type: "response.output_text.delta", delta: ", world!"},
-    {type: "response.output_item.done",
-     item: {type: "message", role: "assistant",
-            content: [{type: "output_text", text: "Hello, world!"}]}},
-    completed
-  )
+  message_response("Hello, world!")
 end
 
 def tool_call_response
@@ -127,6 +194,28 @@ def response_for(scenario, request_number)
   when "tool-write"
     [200, "OK", "text/event-stream",
      request_number.zero? ? tool_call_response : tool_final_response]
+  when "conversation-first"
+    [200, "OK", "text/event-stream", message_response("Alpha stored")]
+  when "conversation-resume"
+    [200, "OK", "text/event-stream", message_response("Alpha and beta recalled")]
+  when "compaction-seed"
+    [200, "OK", "text/event-stream", message_response("Seed response")]
+  when "context-error-seed"
+    [200, "OK", "text/event-stream", message_response("Context error seed response")]
+  when "compaction-resume"
+    text = request_number.zero? ? "The seed established compactable state." :
+                                  "Continued from compacted state"
+    [200, "OK", "text/event-stream", message_response(text)]
+  when "context-error-retry"
+    case request_number
+    when 0
+      [400, "Bad Request", "application/json",
+       JSON.generate(error: {message: "Your input exceeds the context window of this model"})]
+    when 1
+      [200, "OK", "text/event-stream", message_response("Recovered context summary")]
+    else
+      [200, "OK", "text/event-stream", message_response("Recovered after retry")]
+    end
   end
 end
 
@@ -142,7 +231,13 @@ end
 abort "usage: mock-server.rb SCENARIO PORT_FILE REQUEST_DIR" unless ARGV.length == 3
 
 scenario, port_file, request_directory = ARGV
-expected_requests = scenario == "tool-write" ? 2 : 1
+expected_requests = if scenario == "context-error-retry"
+                      3
+                    elsif %w[tool-write compaction-resume].include?(scenario)
+                      2
+                    else
+                      1
+                    end
 server = TCPServer.new("127.0.0.1", 0)
 File.write(port_file, "#{server.addr[1]}\n")
 

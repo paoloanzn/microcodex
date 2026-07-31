@@ -41,6 +41,9 @@ scenarios cover streamed text, an HTTP error, and a complete two-request tool
 loop in which the model asks the real `write` tool to change the test working
 directory. This verifies the CLI, credential loading, request construction,
 SSE handling, tool execution, transcript replay, and final output together.
+Conversation scenarios also cover durable JSONL turns, listing and walking
+saved history, exact replay after resume, compaction checkpoints, and the
+invariant that compaction never removes the durable transcript.
 
 The production endpoint is unchanged by default. The runner sets
 `MICROCODEX_API_ENDPOINT` only for child processes that use fake credentials.

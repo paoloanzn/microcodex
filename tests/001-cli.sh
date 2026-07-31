@@ -9,6 +9,9 @@ expect_process "T1.1: help describes every CLI mode" 0 \
 Usage:
   microcodex login
   microcodex logout
+  microcodex list
+  microcodex show ID
+  microcodex [--model MODEL] resume ID [PROMPT]
   microcodex [--model MODEL]
   microcodex [--model MODEL] PROMPT
 STDOUT
@@ -19,6 +22,9 @@ expect_process "T1.2: --model requires a value" 1 \
 Usage:
   microcodex login
   microcodex logout
+  microcodex list
+  microcodex show ID
+  microcodex [--model MODEL] resume ID [PROMPT]
   microcodex [--model MODEL]
   microcodex [--model MODEL] PROMPT
 STDOUT

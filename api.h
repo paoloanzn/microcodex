@@ -3,11 +3,16 @@
 
 #pragma once
 
+#include "context-compaction.h"
+#include "conversation.h"
 #include "event-emitter.h"
+#include "response-item.h"
 #include "tool.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <expected>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -29,25 +34,20 @@ namespace microcodex {
         long idle_timeout_seconds = 300;
         std::size_t maximum_tool_rounds = 64;
         std::size_t maximum_parallel_tool_calls = 32;
+        std::size_t maximum_tool_output_bytes = 64 * 1024;
+        std::size_t context_limit_tokens = 128 * 1024;
+        std::size_t compact_at_tokens = 96 * 1024;
+        std::size_t retained_context_tokens = 20 * 1024;
+        bool persist_conversation = true;
+        std::optional<std::filesystem::path> resume_conversation;
         std::vector<std::shared_ptr<const ToolBase>> tools;
-    };
-
-    struct CodexToolCall {
-        std::string call_id;
-        std::string name;
-        // The Responses API sends function arguments as JSON encoded in a string.
-        std::string arguments;
-    };
-
-    struct CodexToolOutput {
-        std::string call_id;
-        std::string output;
     };
 
     struct CodexApiResponse {
         std::string text;
         // All tool calls executed across the sampling rounds of this turn.
         std::vector<CodexToolCall> tool_calls;
+        std::size_t input_tokens = 0;
     };
 
     // A synchronous, stateful Codex conversation. sendUserMessage() owns the
@@ -65,6 +65,13 @@ namespace microcodex {
         CodexApi &operator=(const CodexApi &) = delete;
 
         std::expected<CodexApiResponse, std::string> sendUserMessage(std::string_view message);
+
+        // Creates or resumes durable conversation state. sendUserMessage() also
+        // calls this lazily, while interactive clients call it before rendering.
+        std::expected<void, std::string> initializeConversation();
+
+        std::expected<std::vector<SavedTurn>, std::string> readHistoryBefore(std::size_t cursor, std::size_t maximum_bytes) const;
+        [[nodiscard]] std::size_t savedTurnCount() const;
 
         // interrupt() is the only operation intended to be called from another
         // thread while sendUserMessage() is running.
@@ -87,16 +94,32 @@ namespace microcodex {
             bool succeeded;
         };
 
-        std::expected<CodexApiResponse, std::string> requestWithToolExecution(std::stop_token stop_token, std::string_view turn_id);
+        struct ModelResponse {
+            CodexApiResponse response;
+            std::vector<std::string> output_items;
+            std::string turn_state;
+        };
+
+        std::expected<CodexApiResponse, std::string> requestWithToolExecution(std::stop_token stop_token, std::string_view turn_id, std::size_t &turn_start);
         std::expected<CodexApiResponse, std::string> request(std::stop_token stop_token, std::string_view turn_id);
+        std::expected<ModelResponse, std::string> performRequest(std::string request_body, std::stop_token stop_token, std::string_view turn_id, bool emit_events) const;
+        std::expected<std::string, std::string> requestSummary(std::span<const std::string> items, std::stop_token stop_token);
+        std::expected<void, std::string> compactContext(std::stop_token stop_token, std::size_t &protected_start, bool force);
         std::expected<std::vector<ToolExecutionResult>, std::string> executeToolCalls(std::span<const CodexToolCall> calls, std::stop_token stop_token, std::string_view turn_id) const;
         ToolExecutionResult executeToolCall(const CodexToolCall &call, std::stop_token stop_token) const;
-        std::expected<std::string, std::string> buildRequestBody() const;
+        std::expected<std::string, std::string> buildRequestBody(std::span<const std::string> items, std::string_view instructions, bool include_tools, std::string_view final_item = {}) const;
         void emitEvent(CodexEvent event) const noexcept;
 
         CodexApiConfig config_;
+        ContextCompactor compactor_;
         CodexEventEmitter *events_ = nullptr;
         std::vector<std::string> input_items_;
+        std::vector<TurnBoundary> completed_turns_;
+        std::optional<ConversationFile> conversation_file_;
+        bool conversation_initialized_ = false;
+        bool has_summary_ = false;
+        std::uint64_t compaction_generation_ = 0;
+        std::size_t reported_input_tokens_ = 0;
         std::string installation_id_;
         std::string session_id_;
         std::string turn_state_;

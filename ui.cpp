@@ -206,6 +206,63 @@ namespace {
         }
         return nullptr;
     }
+    // Maybe this does too much? Could be split into different routines
+    std::expected<void, std::string> loadSavedHistory(UiState &state, microcodex::CodexApi &api) {
+        auto initialized = api.initializeConversation();
+        if (!initialized) return std::unexpected(initialized.error());
+
+        auto turns = api.readHistoryBefore(api.savedTurnCount(), maximum_transcript_bytes);
+        if (!turns) return std::unexpected(turns.error());
+        for (const microcodex::SavedTurn &turn : *turns) {
+            for (const std::string &item : turn.items) {
+                auto message = microcodex::responseMessage(item);
+                if (!message) return std::unexpected(message.error());
+                if (*message) {
+                    const bool user = (*message)->role == "user";
+                    addEntry(state, {
+                        .kind = user ? EntryKind::User : EntryKind::Assistant,
+                        .turn_id = turn.id,
+                        .call_id = {},
+                        .title = user ? "you" : "codex",
+                        .text = std::move((*message)->text),
+                        .output = {},
+                        .markdown_cache = {},
+                    });
+                    continue;
+                }
+
+                auto call = microcodex::responseToolCall(item);
+                if (!call) return std::unexpected(call.error());
+                if (*call) {
+                    addEntry(state, {
+                        .kind = EntryKind::Tool,
+                        .turn_id = turn.id,
+                        .call_id = std::move((*call)->call_id),
+                        .title = std::move((*call)->name),
+                        .text = std::move((*call)->arguments),
+                        .output = {},
+                        .markdown_cache = {},
+                        .finished = false,
+                    });
+                    continue;
+                }
+
+                auto output = microcodex::responseToolOutput(item);
+                if (!output) return std::unexpected(output.error());
+                if (*output) {
+                    UiEntry *entry = findToolEntry(state, (*output)->call_id);
+                    if (entry != nullptr) {
+                        replaceEntryOutput(state, *entry, std::move((*output)->output));
+                        entry->finished = true;
+                        entry->succeeded = !entry->output.starts_with("Error:");
+                    }
+                }
+            }
+        }
+        state.scroll = 0;
+        state.dirty = true;
+        return {};
+    }
 
     void finishAssistantEntries(UiState &state, const std::string_view turn_id) {
         for (UiEntry &entry : state.transcript) {
@@ -364,10 +421,7 @@ namespace {
         state.dirty = true;
     }
 
-    WrappedText wrapText(const std::string_view text, const int width,
-                         const std::string_view first_prefix,
-                         const std::string_view continuation_prefix,
-                         const std::size_t cursor = std::string_view::npos) {
+    WrappedText wrapText(const std::string_view text, const int width, const std::string_view first_prefix, const std::string_view continuation_prefix, const std::size_t cursor = std::string_view::npos) {
         WrappedText result;
         std::string line(first_prefix);
         int column = textWidth(first_prefix);
@@ -452,8 +506,7 @@ namespace {
         return result;
     }
 
-    void appendLines(std::vector<StyledLine> &destination,
-                     std::vector<StyledLine> source) {
+    void appendLines(std::vector<StyledLine> &destination, std::vector<StyledLine> source) {
         for (StyledLine &line : source) {
             destination.push_back(std::move(line));
         }
@@ -477,8 +530,7 @@ namespace {
         return std::move(*command);
     }
 
-    void appendToolLines(std::vector<StyledLine> &lines, const UiEntry &entry,
-                         const int width) {
+    void appendToolLines(std::vector<StyledLine> &lines, const UiEntry &entry, const int width) {
         const uintattr_t bullet_color = !entry.finished
                                             ? muted_foreground
                                             : (entry.succeeded ? success_foreground
@@ -512,8 +564,7 @@ namespace {
                                           output_continuation, muted_foreground));
     }
 
-    void appendAssistantLines(std::vector<StyledLine> &lines, UiEntry &entry,
-                              const int width) {
+    void appendAssistantLines(std::vector<StyledLine> &lines, UiEntry &entry, const int width) {
         const int content_width = std::max(1, width - 2);
         MarkdownRenderCache &cache = entry.markdown_cache;
         if (cache.width != content_width || cache.source_size != entry.text.size()) {
@@ -905,8 +956,7 @@ namespace {
         state.dirty = true;
     }
 
-    void handleKey(UiState &state, microcodex::CodexApi &api, TurnFuture &turn,
-                   const tb_event &event) {
+    void handleKey(UiState &state, microcodex::CodexApi &api, TurnFuture &turn, const tb_event &event) {
         if (event.key == TB_KEY_CTRL_Q) {
             state.quitting = true;
             return;
@@ -1010,8 +1060,7 @@ namespace {
         }
     }
 
-    void stopActiveTurn(UiState &state, PendingEvents &pending,
-                        microcodex::CodexApi &api, TurnFuture &turn) {
+    void stopActiveTurn(UiState &state, PendingEvents &pending, microcodex::CodexApi &api, TurnFuture &turn) {
         if (!turn.valid()) {
             return;
         }
@@ -1032,6 +1081,9 @@ namespace microcodex {
         CodexApi api(std::move(config), emitter);
         TurnFuture turn;
         UiState state;
+
+        auto history = loadSavedHistory(state, api);
+        if (!history) return std::unexpected(history.error());
 
         const int initialized = tb_init();
         if (initialized != TB_OK) {
