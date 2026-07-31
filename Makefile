@@ -20,7 +20,7 @@ CFLAGS   := -std=c17 -Wall -Wextra $(PLATFORM_FLAGS)
 LDFLAGS  := -pthread $(PLATFORM_FLAGS)
 LDLIBS   := -lcurl $(PLATFORM_LIBS)
 
-TARGET := build/app
+TARGET := build/microcodex
 
 CPP_SOURCES := $(wildcard *.cpp)
 C_SOURCES   := $(wildcard *.c) vendor/md4c/src/md4c.c
