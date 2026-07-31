@@ -72,6 +72,7 @@ The executable is written to `build/microcodex`. Run the test suite with `make t
 
 ## Known bugs and issues
 
+- Skill and MCP support is not implemented yet.
 - Text cannot currently be copied from the terminal while using MicroCodex.
 - Dangerous shell commands are not yet gated by a safe-command policy.
 
