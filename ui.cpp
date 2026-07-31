@@ -38,6 +38,7 @@ namespace {
 
     constexpr std::size_t maximum_transcript_bytes = 512 * 1024;
     constexpr std::size_t maximum_tool_preview_bytes = 16 * 1024;
+    constexpr std::size_t maximum_collapsed_tool_output_rows = 5;
     constexpr int animation_frame_milliseconds = 32;
     constexpr int idle_poll_milliseconds = 250;
     constexpr int maximum_prompt_rows = 6;
@@ -88,6 +89,7 @@ namespace {
         std::size_t scroll = 0;
         std::chrono::steady_clock::time_point turn_started_at{};
         int working_row = -1;
+        bool tool_output_expanded = false;
         bool dirty = true;
         bool quitting = false;
     };
@@ -512,6 +514,36 @@ namespace {
         }
     }
 
+    std::vector<StyledLine> collapseToolOutput(std::vector<StyledLine> output_lines) {
+        if (output_lines.size() <= maximum_collapsed_tool_output_rows) {
+            return output_lines;
+        }
+
+        const std::size_t visible_rows = maximum_collapsed_tool_output_rows - 1;
+        const std::size_t head_rows = visible_rows / 2;
+        const std::size_t tail_rows = visible_rows - head_rows;
+        const std::size_t omitted_rows = output_lines.size() - head_rows - tail_rows;
+
+        std::vector<StyledLine> collapsed;
+        collapsed.reserve(maximum_collapsed_tool_output_rows);
+        for (std::size_t index = 0; index < head_rows; ++index) {
+            collapsed.push_back(std::move(output_lines[index]));
+        }
+
+        StyledLine omission = lineWithPrefix({{"    ", faint_foreground}});
+        appendSpan(omission,
+                   "… +" + std::to_string(omitted_rows) +
+                       " lines (ctrl + t to view full output)",
+                   muted_foreground | TB_DIM);
+        collapsed.push_back(std::move(omission));
+
+        for (std::size_t index = output_lines.size() - tail_rows;
+             index < output_lines.size(); ++index) {
+            collapsed.push_back(std::move(output_lines[index]));
+        }
+        return collapsed;
+    }
+
     std::string toolInvocation(const UiEntry &entry) {
         if (entry.text.empty()) {
             return entry.title;
@@ -530,7 +562,8 @@ namespace {
         return std::move(*command);
     }
 
-    void appendToolLines(std::vector<StyledLine> &lines, const UiEntry &entry, const int width) {
+    void appendToolLines(std::vector<StyledLine> &lines, const UiEntry &entry,
+                         const int width, const bool show_full_output) {
         const uintattr_t bullet_color = !entry.finished
                                             ? muted_foreground
                                             : (entry.succeeded ? success_foreground
@@ -560,8 +593,12 @@ namespace {
                                             : std::string_view(entry.output);
         const StyledLine output_first = lineWithPrefix({{"  └ ", faint_foreground}});
         const StyledLine output_continuation = lineWithPrefix({{"    ", faint_foreground}});
-        appendLines(lines, wrapStyledText(output, width, output_first,
-                                          output_continuation, muted_foreground));
+        std::vector<StyledLine> output_lines = wrapStyledText(
+            output, width, output_first, output_continuation, muted_foreground);
+        if (!show_full_output) {
+            output_lines = collapseToolOutput(std::move(output_lines));
+        }
+        appendLines(lines, std::move(output_lines));
     }
 
     void appendAssistantLines(std::vector<StyledLine> &lines, UiEntry &entry, const int width) {
@@ -631,7 +668,7 @@ namespace {
                 lines.push_back({});
                 break;
             case EntryKind::Tool:
-                appendToolLines(lines, entry, width);
+                appendToolLines(lines, entry, width, state.tool_output_expanded);
                 lines.push_back({});
                 break;
             case EntryKind::Error:
@@ -998,6 +1035,12 @@ namespace {
         }
         if (event.key == TB_KEY_CTRL_L) {
             tb_invalidate();
+            state.dirty = true;
+            return;
+        }
+        if (event.key == TB_KEY_CTRL_T) {
+            state.tool_output_expanded = !state.tool_output_expanded;
+            state.scroll = 0;
             state.dirty = true;
             return;
         }
