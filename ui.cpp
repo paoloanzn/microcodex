@@ -16,6 +16,7 @@
 #include <exception>
 #include <future>
 #include <initializer_list>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -51,6 +52,8 @@ namespace {
     constexpr uintattr_t faint_foreground = 240;
     constexpr uintattr_t success_foreground = 10;
     constexpr uintattr_t error_foreground = 9;
+    constexpr uintattr_t added_background = 22;
+    constexpr uintattr_t removed_background = 52;
 
     enum class EntryKind {
         User,
@@ -78,6 +81,7 @@ namespace {
         MarkdownRenderCache markdown_cache;
         bool finished = true;
         bool succeeded = true;
+        std::shared_ptr<const microcodex::EditResult> edit;
     };
 
     struct UiState {
@@ -118,6 +122,7 @@ namespace {
                     .call_id = event.call_id,
                     .tool_name = event.tool_name,
                     .text = std::move(text),
+                    .edit = event.edit,
                     .succeeded = event.succeeded,
                 };
 
@@ -170,9 +175,21 @@ namespace {
     using TurnResult = std::expected<microcodex::CodexApiResponse, std::string>;
     using TurnFuture = std::future<TurnResult>;
 
+    std::size_t editBytes(const std::shared_ptr<const microcodex::EditResult>& edit) {
+        if (!edit) return 0;
+        std::size_t bytes = edit->path.size();
+        for (const microcodex::EditHunk& hunk : edit->hunks) {
+            if (hunk.context_before) bytes += hunk.context_before->size();
+            if (hunk.context_after) bytes += hunk.context_after->size();
+            for (const std::string& line : hunk.removed_lines) bytes += line.size();
+            for (const std::string& line : hunk.added_lines) bytes += line.size();
+        }
+        return bytes;
+    }
+
     std::size_t entryBytes(const UiEntry &entry) {
         return entry.turn_id.size() + entry.call_id.size() + entry.title.size() +
-               entry.text.size() + entry.output.size();
+               entry.text.size() + entry.output.size() + editBytes(entry.edit);
     }
 
     void trimTranscript(UiState &state) {
@@ -193,6 +210,13 @@ namespace {
         state.transcript_bytes -= entry.output.size();
         entry.output = std::move(output);
         state.transcript_bytes += entry.output.size();
+    }
+
+    void replaceEntryEdit(UiState &state, UiEntry &entry,
+                          std::shared_ptr<const microcodex::EditResult> edit) {
+        state.transcript_bytes -= editBytes(entry.edit);
+        entry.edit = std::move(edit);
+        state.transcript_bytes += editBytes(entry.edit);
     }
 
     void appendEntryText(UiState &state, UiEntry &entry, const std::string_view text) {
@@ -229,6 +253,7 @@ namespace {
                         .text = std::move((*message)->text),
                         .output = {},
                         .markdown_cache = {},
+                        .edit = {},
                     });
                     continue;
                 }
@@ -245,6 +270,7 @@ namespace {
                         .output = {},
                         .markdown_cache = {},
                         .finished = false,
+                        .edit = {},
                     });
                     continue;
                 }
@@ -286,6 +312,7 @@ namespace {
             .text = std::string(text),
             .output = {},
             .markdown_cache = {},
+            .edit = {},
         });
     }
 
@@ -314,6 +341,7 @@ namespace {
                     .output = {},
                     .markdown_cache = {},
                     .finished = false,
+                    .edit = {},
                 });
             }
             break;
@@ -328,6 +356,7 @@ namespace {
                 .output = {},
                 .markdown_cache = {},
                 .finished = false,
+                .edit = {},
             });
             state.status = "Running " + event.tool_name + "...";
             break;
@@ -344,11 +373,13 @@ namespace {
                     .output = {},
                     .markdown_cache = {},
                     .finished = false,
+                    .edit = {},
                 });
             }
             // Keep the arguments received in ToolStarted. Codex's transcript
             // shows what was called and the result as two distinct rows.
             replaceEntryOutput(state, *entry, event.text);
+            replaceEntryEdit(state, *entry, event.edit);
             entry->finished = true;
             entry->succeeded = event.succeeded;
             state.status = event.succeeded ? "Tool completed" : "Tool failed";
@@ -562,8 +593,101 @@ namespace {
         return std::move(*command);
     }
 
+    std::string paddedLineNumber(const std::size_t number, const std::size_t width) {
+        std::string text = std::to_string(number);
+        text.insert(0, width - text.size(), ' ');
+        return text;
+    }
+
+    void appendDiffLine(std::vector<StyledLine>& lines, const std::string_view text,
+                        const std::size_t number, const std::size_t number_width,
+                        const char marker, const int width) {
+        const bool added = marker == '+';
+        const bool removed = marker == '-';
+        const uintattr_t foreground = added ? success_foreground
+                                            : removed ? error_foreground : TB_DEFAULT;
+        const uintattr_t background = added ? added_background
+                                            : removed ? removed_background : TB_DEFAULT;
+        const StyledLine first = lineWithPrefix({
+            {"    ", TB_DEFAULT},
+            {paddedLineNumber(number, number_width) + " ", muted_foreground | TB_DIM},
+            {std::string(1, marker), foreground},
+        }, background, added || removed);
+        const StyledLine continuation = lineWithPrefix({
+            {std::string(4 + number_width + 2, ' '), TB_DEFAULT},
+        }, background, added || removed);
+        appendLines(lines, wrapStyledText(text, width, first, continuation, foreground));
+    }
+
+    void appendEditLines(std::vector<StyledLine>& lines, const microcodex::EditResult& edit,
+                         const int width) {
+        std::size_t added = 0;
+        std::size_t removed = 0;
+        std::size_t maximum_line = 1;
+        for (const microcodex::EditHunk& hunk : edit.hunks) {
+            added += hunk.added_lines.size();
+            removed += hunk.removed_lines.size();
+            if (!hunk.removed_lines.empty()) {
+                maximum_line = std::max(
+                    maximum_line, hunk.old_start + hunk.removed_lines.size() - 1);
+            }
+            if (!hunk.added_lines.empty()) {
+                maximum_line = std::max(
+                    maximum_line, hunk.new_start + hunk.added_lines.size() - 1);
+            }
+            if (hunk.context_after) {
+                maximum_line = std::max(
+                    maximum_line, hunk.new_start + hunk.added_lines.size());
+            }
+        }
+        const std::size_t number_width = std::to_string(maximum_line).size();
+
+        StyledLine header;
+        appendSpan(header, "• ", muted_foreground | TB_DIM);
+        appendSpan(header, "Edited ", TB_DEFAULT | TB_BOLD);
+        appendSpan(header, edit.path);
+        appendSpan(header, " (");
+        appendSpan(header, "+" + std::to_string(added), success_foreground);
+        appendSpan(header, " ");
+        appendSpan(header, "-" + std::to_string(removed), error_foreground);
+        appendSpan(header, ")");
+        appendLines(lines, wrapStyledSpans(
+            header.spans, width, StyledLine{}, lineWithPrefix({{"  ", TB_DEFAULT}})));
+
+        for (std::size_t hunk_index = 0; hunk_index < edit.hunks.size(); ++hunk_index) {
+            const microcodex::EditHunk& hunk = edit.hunks[hunk_index];
+            if (hunk_index != 0) {
+                StyledLine separator;
+                appendSpan(separator, std::string(5 + number_width, ' '));
+                appendSpan(separator, "⋮", muted_foreground | TB_DIM);
+                lines.push_back(std::move(separator));
+            }
+            if (hunk.context_before) {
+                appendDiffLine(lines, *hunk.context_before, hunk.new_start - 1,
+                               number_width, ' ', width);
+            }
+            for (std::size_t index = 0; index < hunk.removed_lines.size(); ++index) {
+                appendDiffLine(lines, hunk.removed_lines[index], hunk.old_start + index,
+                               number_width, '-', width);
+            }
+            for (std::size_t index = 0; index < hunk.added_lines.size(); ++index) {
+                appendDiffLine(lines, hunk.added_lines[index], hunk.new_start + index,
+                               number_width, '+', width);
+            }
+            if (hunk.context_after) {
+                appendDiffLine(lines, *hunk.context_after,
+                               hunk.new_start + hunk.added_lines.size(),
+                               number_width, ' ', width);
+            }
+        }
+    }
+
     void appendToolLines(std::vector<StyledLine> &lines, const UiEntry &entry,
                          const int width, const bool show_full_output) {
+        if (entry.finished && entry.succeeded && entry.edit) {
+            appendEditLines(lines, *entry.edit, width);
+            return;
+        }
         const uintattr_t bullet_color = !entry.finished
                                             ? muted_foreground
                                             : (entry.succeeded ? success_foreground
@@ -907,6 +1031,7 @@ namespace {
             .text = message,
             .output = {},
             .markdown_cache = {},
+            .edit = {},
         });
 
         try {

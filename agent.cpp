@@ -21,7 +21,7 @@ namespace {
 
     using microcodex::ToolArguments;
 
-    std::expected<std::string, std::string> executeRead(std::expected<std::string, std::string> (*callable)(const std::string &, std::size_t, std::size_t), const ToolArguments &arguments, const std::stop_token stop_token) {
+    std::expected<microcodex::ToolResult, std::string> executeRead(std::expected<std::string, std::string> (*callable)(const std::string &, std::size_t, std::size_t), const ToolArguments &arguments, const std::stop_token stop_token) {
         auto path = arguments.string("path");
         auto offset = arguments.size("offset");
         auto limit = arguments.size("limit");
@@ -31,10 +31,12 @@ namespace {
         if (stop_token.stop_requested()) {
             return std::unexpected("Tool execution interrupted");
         }
-        return callable(*path, *offset, *limit);
+        auto result = callable(*path, *offset, *limit);
+        if (!result) return std::unexpected(result.error());
+        return microcodex::ToolResult{std::move(*result), {}};
     }
 
-    std::expected<std::string, std::string> executeWrite(std::expected<int, std::string> (*callable)(const std::string &, std::string_view), const ToolArguments &arguments, const std::stop_token stop_token) {
+    std::expected<microcodex::ToolResult, std::string> executeWrite(std::expected<int, std::string> (*callable)(const std::string &, std::string_view), const ToolArguments &arguments, const std::stop_token stop_token) {
         auto path = arguments.string("path");
         auto content = arguments.string("content");
         if (!path || !content) {
@@ -47,10 +49,10 @@ namespace {
         if (!result) {
             return std::unexpected(result.error());
         }
-        return "Created " + *path;
+        return microcodex::ToolResult{"Created " + *path, {}};
     }
 
-    std::expected<std::string, std::string> executeEdit(std::expected<int, std::string> (*callable)(const std::string &, std::string_view, std::string_view, bool), const ToolArguments &arguments, const std::stop_token stop_token) {
+    std::expected<microcodex::ToolResult, std::string> executeEdit(std::expected<microcodex::EditResult, std::string> (*callable)(const std::string &, std::string_view, std::string_view, bool), const ToolArguments &arguments, const std::stop_token stop_token) {
         auto path = arguments.string("path");
         auto old_content = arguments.string("old_content");
         auto new_content = arguments.string("new_content");
@@ -68,10 +70,13 @@ namespace {
         if (!result) {
             return std::unexpected(result.error());
         }
-        return "Edited " + *path;
+        return microcodex::ToolResult{
+            "Edited " + *path,
+            std::make_shared<microcodex::EditResult>(std::move(*result)),
+        };
     }
 
-    std::expected<std::string, std::string> executeGlob(std::expected<std::string, std::string> (*callable)(const std::string &), const ToolArguments &arguments, const std::stop_token stop_token) {
+    std::expected<microcodex::ToolResult, std::string> executeGlob(std::expected<std::string, std::string> (*callable)(const std::string &), const ToolArguments &arguments, const std::stop_token stop_token) {
         auto pattern = arguments.string("pattern");
         if (!pattern) {
             return std::unexpected(pattern.error());
@@ -79,10 +84,12 @@ namespace {
         if (stop_token.stop_requested()) {
             return std::unexpected("Tool execution interrupted");
         }
-        return callable(*pattern);
+        auto result = callable(*pattern);
+        if (!result) return std::unexpected(result.error());
+        return microcodex::ToolResult{std::move(*result), {}};
     }
 
-    std::expected<std::string, std::string> executeBash(std::expected<microcodex::BashCommandResult, std::string> (*callable)(const std::string &, std::stop_token), const ToolArguments &arguments, const std::stop_token stop_token) {
+    std::expected<microcodex::ToolResult, std::string> executeBash(std::expected<microcodex::BashCommandResult, std::string> (*callable)(const std::string &, std::stop_token), const ToolArguments &arguments, const std::stop_token stop_token) {
         auto command = arguments.string("command");
         if (!command) {
             return std::unexpected(command.error());
@@ -97,12 +104,12 @@ namespace {
         output += ",\"stderr\":";
         microcodex::json::appendString(output, result->stderr);
         output += ",\"exit_code\":" + std::to_string(result->error_code) + '}';
-        return output;
+        return microcodex::ToolResult{std::move(output), {}};
     }
 
     using ReadTool  = microcodex::Tool<std::expected<std::string, std::string>, const std::string &, std::size_t, std::size_t>;
     using WriteTool = microcodex::Tool<std::expected<int, std::string>, const std::string &, std::string_view>;
-    using EditTool  = microcodex::Tool<std::expected<int, std::string>, const std::string &, std::string_view, std::string_view, bool>;
+    using EditTool  = microcodex::Tool<std::expected<microcodex::EditResult, std::string>, const std::string &, std::string_view, std::string_view, bool>;
     using GlobTool  = microcodex::Tool<std::expected<std::string, std::string>, const std::string &>;
     using BashTool  = microcodex::Tool<std::expected<microcodex::BashCommandResult, std::string>, const std::string &, std::stop_token>;
 

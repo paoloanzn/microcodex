@@ -126,6 +126,7 @@ namespace {
             .call_id = {},
             .tool_name = {},
             .text = std::string(text),
+            .edit = {},
         });
     }
 
@@ -483,21 +484,21 @@ namespace microcodex {
         std::size_t turn_start = input_items_.size();
         auto compacted = compactContext(turn_stop.get_token(), turn_start, false);
         if (!compacted) {
-            emitEvent({.type = CodexEventType::Error, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = compacted.error(), .succeeded = false});
+            emitEvent({.type = CodexEventType::Error, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = compacted.error(), .edit = {}, .succeeded = false});
             return std::unexpected(compacted.error());
         }
 
         turn_state_.clear();
         ++turn_number_;
         input_items_.push_back(userMessageItem(message));
-        emitEvent({.type = CodexEventType::TurnStarted, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = {}});
+        emitEvent({.type = CodexEventType::TurnStarted, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = {}, .edit = {}});
 
         compacted = compactContext(turn_stop.get_token(), turn_start, false);
         if (!compacted) {
             input_items_.resize(turn_start);
             turn_number_ = previous_turn;
             turn_state_ = previous_turn_state;
-            emitEvent({.type = CodexEventType::Error, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = compacted.error(), .succeeded = false});
+            emitEvent({.type = CodexEventType::Error, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = compacted.error(), .edit = {}, .succeeded = false});
             return std::unexpected(compacted.error());
         }
 
@@ -511,11 +512,11 @@ namespace microcodex {
             turn_state_ = previous_turn_state;
 
             if (turn_stop.stop_requested()) {
-                emitEvent({.type = CodexEventType::TurnInterrupted, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = std::string(interrupted_message)});
+                emitEvent({.type = CodexEventType::TurnInterrupted, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = std::string(interrupted_message), .edit = {}});
                 return std::unexpected(std::string(interrupted_message));
             }
 
-            emitEvent({.type = CodexEventType::Error, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = response.error(), .succeeded = false});
+            emitEvent({.type = CodexEventType::Error, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = response.error(), .edit = {}, .succeeded = false});
             return std::unexpected(response.error());
         }
 
@@ -527,7 +528,7 @@ namespace microcodex {
                 input_items_.resize(turn_start);
                 turn_number_ = previous_turn;
                 turn_state_ = previous_turn_state;
-                emitEvent({.type = CodexEventType::Error, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = saved.error(), .succeeded = false});
+                emitEvent({.type = CodexEventType::Error, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = saved.error(), .edit = {}, .succeeded = false});
                 return std::unexpected(saved.error());
             }
         }
@@ -536,7 +537,7 @@ namespace microcodex {
             .end = input_items_.size(),
         });
 
-        emitEvent({.type = CodexEventType::TurnCompleted, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = response->text});
+        emitEvent({.type = CodexEventType::TurnCompleted, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = response->text, .edit = {}});
         return response;
     }
 
@@ -691,29 +692,30 @@ namespace microcodex {
     CodexApi::ToolExecutionResult CodexApi::executeToolCall(const CodexToolCall &call, const std::stop_token stop_token) const {
         try {
             if (stop_token.stop_requested()) {
-                return {{call.call_id, "Error: Tool execution interrupted"}, false};
+                return {{call.call_id, "Error: Tool execution interrupted"}, {}, false};
             }
 
             const auto tool = std::find_if(config_.tools.begin(), config_.tools.end(), [&call](const auto &candidate) {
                 return candidate != nullptr && candidate->name() == call.name;
             });
             auto result = tool == config_.tools.end()
-                              ? std::expected<std::string, std::string>(std::unexpected("Unknown tool '" + call.name + "'"))
+                              ? std::expected<ToolResult, std::string>(std::unexpected("Unknown tool '" + call.name + "'"))
                               : (*tool)->executeJson(call.arguments, stop_token);
             if (stop_token.stop_requested()) {
-                return {{call.call_id, "Error: Tool execution interrupted"}, false};
+                return {{call.call_id, "Error: Tool execution interrupted"}, {}, false};
             }
             if (!result) {
-                return {{call.call_id, "Error: " + result.error()}, false};
+                return {{call.call_id, "Error: " + result.error()}, {}, false};
             }
             return {{call.call_id,
-                     boundedToolOutput(std::move(*result),
+                     boundedToolOutput(std::move(result->output),
                                        config_.maximum_tool_output_bytes)},
+                    std::move(result->edit),
                     true};
         } catch (const std::exception &error) {
-            return {{call.call_id, std::string("Error: Tool threw an exception: ") + error.what()}, false};
+            return {{call.call_id, std::string("Error: Tool threw an exception: ") + error.what()}, {}, false};
         } catch (...) {
-            return {{call.call_id, "Error: Tool threw an unknown exception"}, false};
+            return {{call.call_id, "Error: Tool threw an unknown exception"}, {}, false};
         }
     }
 
@@ -748,6 +750,7 @@ namespace microcodex {
                     .call_id = call.call_id,
                     .tool_name = call.name,
                     .text = call.arguments,
+                    .edit = {},
                 });
                 futures.push_back(std::async(std::launch::async, [this, call, stop_token] {
                     return executeToolCall(call, stop_token);
@@ -769,9 +772,9 @@ namespace microcodex {
                 // their actual execution.
                 result = futures[index].get();
             } catch (const std::exception &error) {
-                result = {{calls[index].call_id, std::string("Error: Tool task failed: ") + error.what()}, false};
+                result = {{calls[index].call_id, std::string("Error: Tool task failed: ") + error.what()}, {}, false};
             } catch (...) {
-                result = {{calls[index].call_id, "Error: Tool task failed"}, false};
+                result = {{calls[index].call_id, "Error: Tool task failed"}, {}, false};
             }
 
             emitEvent({
@@ -780,6 +783,7 @@ namespace microcodex {
                 .call_id = calls[index].call_id,
                 .tool_name = calls[index].name,
                 .text = result.output.output,
+                .edit = result.edit,
                 .succeeded = result.succeeded,
             });
             results.push_back(std::move(result));

@@ -60,7 +60,7 @@ end
 
 def validate_coding_tools!(payload)
   tool_names = payload.fetch("tools").map { |tool| tool["name"] }
-  assert((%w[read write bash] - tool_names).empty?,
+  assert((%w[read write edit bash] - tool_names).empty?,
          "request did not advertise the coding tools")
 end
 
@@ -91,6 +91,21 @@ def validate_scenario!(scenario, request_number, payload)
                                          "call_id" => "call_write",
                                          "output" => "Created result.txt"} },
              "second request did not contain the real tool output")
+    end
+  when "tool-edit"
+    validate_coding_tools!(payload)
+    if request_number.zero?
+      assert(input_text(payload) == "Edit the requested file",
+             "edit scenario did not receive the user prompt")
+    else
+      input = payload.fetch("input")
+      assert(input.any? { |item| item["type"] == "function_call" &&
+                                item["call_id"] == "call_edit" && item["name"] == "edit" },
+             "second request did not replay the edit call")
+      assert(input.any? { |item| item == {"type" => "function_call_output",
+                                         "call_id" => "call_edit",
+                                         "output" => "Edited edit-target.txt"} },
+             "second request did not contain the edit result")
     end
   when "conversation-first"
     validate_coding_tools!(payload)
@@ -197,6 +212,17 @@ def tool_final_response
   )
 end
 
+def edit_call_response
+  arguments = JSON.generate(path: "edit-target.txt", old_content: "line two",
+                            new_content: "line two changed", replace_all: false)
+  sse(
+    {type: "response.output_item.done",
+     item: {type: "function_call", call_id: "call_edit", name: "edit",
+            arguments: arguments}},
+    completed
+  )
+end
+
 def response_for(scenario, request_number)
   case scenario
   when "text" then [200, "OK", "text/event-stream", text_response]
@@ -206,6 +232,9 @@ def response_for(scenario, request_number)
   when "tool-write"
     [200, "OK", "text/event-stream",
      request_number.zero? ? tool_call_response : tool_final_response]
+  when "tool-edit"
+    [200, "OK", "text/event-stream",
+     request_number.zero? ? edit_call_response : message_response("Edited edit-target.txt")]
   when "conversation-first"
     [200, "OK", "text/event-stream", message_response("Alpha stored")]
   when "conversation-resume"
@@ -265,7 +294,7 @@ abort "usage: mock-server.rb SCENARIO PORT_FILE REQUEST_DIR" unless ARGV.length 
 scenario, port_file, request_directory = ARGV
 expected_requests = if scenario == "context-error-retry"
                       3
-                    elsif %w[tool-write compaction-resume].include?(scenario)
+                    elsif %w[tool-write tool-edit compaction-resume].include?(scenario)
                       2
                     else
                       1

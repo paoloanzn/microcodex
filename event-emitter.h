@@ -3,7 +3,10 @@
 
 #pragma once
 
+#include "edit.h"
+
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 
@@ -25,13 +28,15 @@ namespace microcodex {
     // text contains an assistant delta, tool arguments, tool output, final
     // response, interruption reason, or error depending on type. call_id and
     // tool_name are populated only for tool events. succeeded is meaningful
-    // only for ToolFinished.
+    // only for ToolFinished. A successful edit also carries compact display
+    // data so the UI does not have to parse the model-facing tool output.
     struct CodexEvent {
         CodexEventType type;
         std::string turn_id;
         std::string call_id;
         std::string tool_name;
         std::string text;
+        std::shared_ptr<const EditResult> edit;
         bool succeeded = true;
     };
 

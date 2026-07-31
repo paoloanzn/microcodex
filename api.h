@@ -98,6 +98,7 @@ namespace microcodex {
     private:
         struct ToolExecutionResult {
             CodexToolOutput output;
+            std::shared_ptr<const EditResult> edit;
             bool succeeded;
         };
 
