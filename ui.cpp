@@ -987,13 +987,20 @@ namespace {
             state.dirty = true;
             return;
         }
-        if (event.key == TB_KEY_PGUP || event.key == TB_KEY_ARROW_UP) {
-            state.scroll += static_cast<std::size_t>(std::max(1, tb_height() - 3));
+        if (event.key == TB_KEY_PGUP || event.key == TB_KEY_ARROW_UP ||
+            event.key == TB_KEY_MOUSE_WHEEL_UP) {
+            const std::size_t amount = event.key == TB_KEY_MOUSE_WHEEL_UP
+                                           ? 3
+                                           : static_cast<std::size_t>(std::max(1, tb_height() - 3));
+            state.scroll += amount;
             state.dirty = true;
             return;
         }
-        if (event.key == TB_KEY_PGDN || event.key == TB_KEY_ARROW_DOWN) {
-            const std::size_t amount = static_cast<std::size_t>(std::max(1, tb_height() - 3));
+        if (event.key == TB_KEY_PGDN || event.key == TB_KEY_ARROW_DOWN ||
+            event.key == TB_KEY_MOUSE_WHEEL_DOWN) {
+            const std::size_t amount = event.key == TB_KEY_MOUSE_WHEEL_DOWN
+                                           ? 3
+                                           : static_cast<std::size_t>(std::max(1, tb_height() - 3));
             state.scroll = state.scroll > amount ? state.scroll - amount : 0;
             state.dirty = true;
             return;
@@ -1032,7 +1039,7 @@ namespace microcodex {
                                    std::string(tb_strerror(initialized)));
         }
         TerminalGuard terminal;
-        tb_set_input_mode(TB_INPUT_ALT);
+        tb_set_input_mode(TB_INPUT_ALT | TB_INPUT_MOUSE);
         const int output_mode = tb_set_output_mode(TB_OUTPUT_256);
         if (output_mode != TB_OK) {
             return std::unexpected("Could not enable 256-color terminal output: " +
@@ -1057,7 +1064,7 @@ namespace microcodex {
             const int polled = tb_peek_event(
                 &event, turn.valid() ? animation_frame_milliseconds : idle_poll_milliseconds);
             if (polled == TB_OK) {
-                if (event.type == TB_EVENT_KEY) {
+                if (event.type == TB_EVENT_KEY || event.type == TB_EVENT_MOUSE) {
                     handleKey(state, api, turn, event);
                 } else if (event.type == TB_EVENT_RESIZE) {
                     state.dirty = true;
