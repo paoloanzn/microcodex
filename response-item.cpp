@@ -6,7 +6,6 @@
 #include "json.h"
 
 #include <utility>
-#include <vector>
 
 namespace microcodex {
 

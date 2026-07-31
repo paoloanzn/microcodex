@@ -19,7 +19,6 @@
 #include <string_view>
 #include <sys/wait.h>
 #include <unistd.h>
-#include <utility>
 #include <vector>
 
 namespace {
