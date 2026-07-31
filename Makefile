@@ -36,6 +36,9 @@ build/%.c.o: %.c
 clean:
 	rm -rf build
 
+test:
+	@sh tests/run.sh
+
 -include $(DEPENDENCIES)
 
 .PHONY: all clean test

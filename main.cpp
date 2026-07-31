@@ -6,6 +6,7 @@
 #include "ui.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <expected>
 #include <iostream>
 #include <optional>
@@ -154,6 +155,13 @@ int main(const int argc, char *argv[]) {
 
     auto config = microcodex::makeCodingAgentConfig(std::move(request->model));
     microcodex::applyOAuthCredentials(config, **credentials);
+    // Keep transport selection at the executable boundary so black-box tests
+    // can exercise the real CLI against a deterministic loopback server. The
+    // default remains the production Codex endpoint.
+    if (const char *endpoint = std::getenv("MICROCODEX_API_ENDPOINT");
+        endpoint != nullptr && endpoint[0] != '\0') {
+        config.endpoint = endpoint;
+    }
     if (request->prompt) {
         return runPrompt(std::move(config), *request->prompt);
     }
