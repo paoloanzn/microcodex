@@ -58,6 +58,15 @@ microcodex "Find the failing test, fix it, and run the relevant test suite"
 > [!WARNING]
 > MicroCodex is not a sandbox. Model-requested commands and file operations run with the same permissions as the MicroCodex process.
 
+### Using Codex skills
+
+MicroCodex discovers the same filesystem skills installed for Codex under
+`$CODEX_HOME/skills`, or `~/.codex/skills` when `CODEX_HOME` is unset. Each
+skill must have a `SKILL.md` with YAML frontmatter containing a `name` and
+`description`. Skill metadata is added to the agent instructions at session
+startup; the complete skill is read only when its name or description matches
+the task.
+
 ### Building from source
 
 Building requires a C++23 compiler, `make`, libcurl development files, and OpenSSL development files on Linux.
@@ -72,7 +81,7 @@ The executable is written to `build/microcodex`. Run the test suite with `make t
 
 ## Known bugs and issues
 
-- Skill and MCP support is not implemented yet.
+- MCP support is not implemented yet.
 - Text cannot currently be copied from the terminal while using MicroCodex.
 - Dangerous shell commands are not yet gated by a safe-command policy.
 

@@ -8,6 +8,8 @@
 #include "glob.h"
 #include "json.h"
 #include "read.h"
+#include "skills.h"
+#include "system-prompt.h"
 #include "write.h"
 
 #include <expected>
@@ -146,7 +148,8 @@ namespace microcodex {
     CodexApiConfig makeCodingAgentConfig(std::string model) {
         CodexApiConfig config;
         config.model = std::move(model);
-        config.instructions = R"(You are MicroCodex, a careful coding agent working in the user's current directory. Use glob and read to inspect relevant files before changing them. Use write only to create a new file; use edit for exact replacements in existing files. Keep edits focused on the request and verify meaningful changes with bash when practical. The bash tool returns stdout, stderr, and exit_code even when a command fails. Give the user a concise final summary.)";
+        config.instructions = std::string(codingAgentSystemPrompt());
+        config.instructions += availableSkillsInstructions();
         config.tools = makeCodingTools();
         return config;
     }

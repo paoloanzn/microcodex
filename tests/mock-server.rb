@@ -75,6 +75,15 @@ def validate_scenario!(scenario, request_number, payload)
     assert(payload["model"] == "test-model", "CLI model option was not sent")
     assert(input_text(payload) == "Say hello from two arguments",
            "CLI prompt arguments were not joined and sent")
+    instructions = payload.fetch("instructions")
+    assert(instructions.include?("You are MicroCodex, an agent based on GPT-5"),
+           "upgraded coding-agent prompt was not sent")
+    assert(!instructions.include?("### Formatting rules"),
+           "trimmed formatting-rules section is still present")
+    assert(instructions.include?("- test-skill: Test shared Codex skill discovery."),
+           "shared Codex skill metadata was not added to the prompt")
+    assert(instructions.include?("/skills/test-skill/SKILL.md"),
+           "shared Codex skill path was not added to the prompt")
   when "http-error"
     validate_coding_tools!(payload)
   when "tool-write"
