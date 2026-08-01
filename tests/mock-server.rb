@@ -86,6 +86,11 @@ def validate_scenario!(scenario, request_number, payload)
            "shared Codex skill path was not added to the prompt")
   when "http-error"
     validate_coding_tools!(payload)
+  when "paste"
+    validate_coding_tools!(payload)
+    expected = "before\n#{"x" * 1001}\nafter"
+    assert(input_text(payload) == expected,
+           "multiline paste was submitted early or changed before sending")
   when "tool-write"
     validate_coding_tools!(payload)
     if request_number.zero?
@@ -304,6 +309,7 @@ end
 def response_for(scenario, request_number)
   case scenario
   when "text" then [200, "OK", "text/event-stream", text_response]
+  when "paste" then [200, "OK", "text/event-stream", message_response("Paste received")]
   when "http-error"
     [429, "Too Many Requests", "application/json",
      JSON.generate(error: {message: "rate limited"})]

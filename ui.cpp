@@ -4,6 +4,7 @@
 #include "styled-text.h"
 #include "markdown.h"
 #include "shell-highlight.h"
+#include "terminal.h"
 #include "tool.h"
 #include "ui.h"
 
@@ -39,6 +40,7 @@ namespace {
 
     constexpr std::size_t maximum_transcript_bytes = 512 * 1024;
     constexpr std::size_t maximum_tool_preview_bytes = 16 * 1024;
+    constexpr std::size_t large_paste_character_threshold = 1000;
     constexpr std::size_t maximum_collapsed_tool_output_rows = 5;
     constexpr int animation_frame_milliseconds = 32;
     constexpr int idle_poll_milliseconds = 250;
@@ -86,7 +88,9 @@ namespace {
 
     struct UiState {
         std::deque<UiEntry> transcript;
+        std::vector<std::pair<std::string, std::string>> pending_pastes;
         std::string input;
+        std::string paste;
         std::string status = "Ready";
         std::string active_model;
         std::size_t input_cursor = 0;
@@ -95,6 +99,7 @@ namespace {
         std::chrono::steady_clock::time_point turn_started_at{};
         int working_row = -1;
         bool tool_output_expanded = false;
+        bool pasting = false;
         bool dirty = true;
         bool quitting = false;
     };
@@ -164,7 +169,10 @@ namespace {
     };
 
     struct TerminalGuard {
-        ~TerminalGuard() { tb_shutdown(); }
+        ~TerminalGuard() {
+            microcodex::terminal::disableBracketedPaste();
+            tb_shutdown();
+        }
     };
 
     struct WrappedText {
@@ -510,6 +518,38 @@ namespace {
         }
         state.input.insert(state.input_cursor, utf8, static_cast<std::size_t>(length));
         state.input_cursor += static_cast<std::size_t>(length);
+        state.dirty = true;
+    }
+
+    void insertPaste(UiState &state) {
+        for (std::size_t position = state.paste.find('\r');
+             position != std::string::npos;
+             position = state.paste.find('\r', position)) {
+            if (position + 1 < state.paste.size() && state.paste[position + 1] == '\n') {
+                state.paste.erase(position, 1);
+            } else {
+                state.paste[position++] = '\n';
+            }
+        }
+        const std::size_t character_count = std::count_if(
+            state.paste.begin(), state.paste.end(),
+            [](const unsigned char byte) { return (byte & 0xc0) != 0x80; });
+        std::string displayed;
+        if (character_count > large_paste_character_threshold) {
+            const std::string base = "[Pasted Content " +
+                                     std::to_string(character_count) + " chars]";
+            displayed = base;
+            for (std::size_t number = 2;
+                 state.input.find(displayed) != std::string::npos; ++number) {
+                displayed = base + " #" + std::to_string(number);
+            }
+            state.pending_pastes.emplace_back(displayed, std::move(state.paste));
+        } else {
+            displayed = std::move(state.paste);
+        }
+        state.input.insert(state.input_cursor, displayed);
+        state.input_cursor += displayed.size();
+        state.paste.clear();
         state.dirty = true;
     }
 
@@ -1080,6 +1120,13 @@ namespace {
         }
 
         std::string message = std::move(state.input);
+        for (auto &[placeholder, paste] : state.pending_pastes) {
+            const std::size_t position = message.find(placeholder);
+            if (position != std::string::npos) {
+                message.replace(position, placeholder.size(), paste);
+            }
+        }
+        state.pending_pastes.clear();
         state.input.clear();
         state.input_cursor = 0;
         state.scroll = 0;
@@ -1178,6 +1225,22 @@ namespace {
         state.dirty = true;
     }
 
+    void appendPastedKey(UiState &state, const tb_event &event) {
+        if (event.key == TB_KEY_ENTER) {
+            state.paste += '\r';
+        } else if (event.key == TB_KEY_CTRL_J) {
+            state.paste += '\n';
+        } else if (event.key == TB_KEY_TAB) {
+            state.paste += '\t';
+        } else if (event.ch != 0) {
+            char utf8[7]{};
+            const int length = tb_utf8_unicode_to_char(utf8, event.ch);
+            if (length > 0) {
+                state.paste.append(utf8, static_cast<std::size_t>(length));
+            }
+        }
+    }
+
     void handleKey(UiState &state, microcodex::CodexApi &api, TurnFuture &turn, const tb_event &event) {
         if (event.key == TB_KEY_CTRL_Q) {
             state.quitting = true;
@@ -1209,8 +1272,9 @@ namespace {
             if (turn.valid()) {
                 api.interrupt();
                 state.status = "Interrupting turn...";
-            } else if (!state.input.empty()) {
+            } else if (!state.input.empty() || !state.pending_pastes.empty()) {
                 state.input.clear();
+                state.pending_pastes.clear();
                 state.input_cursor = 0;
                 state.status = "Input cleared";
             }
@@ -1357,6 +1421,11 @@ namespace microcodex {
         }
         TerminalGuard terminal;
         tb_set_input_mode(TB_INPUT_ALT | TB_INPUT_MOUSE);
+        const int paste_mode = terminal::enableBracketedPaste();
+        if (paste_mode != TB_OK) {
+            return std::unexpected("Could not enable terminal paste handling: " +
+                                   std::string(tb_strerror(paste_mode)));
+        }
         const int output_mode = tb_set_output_mode(TB_OUTPUT_256);
         if (output_mode != TB_OK) {
             return std::unexpected("Could not enable 256-color terminal output: " +
@@ -1381,7 +1450,17 @@ namespace microcodex {
             const int polled = tb_peek_event(
                 &event, turn.valid() ? animation_frame_milliseconds : idle_poll_milliseconds);
             if (polled == TB_OK) {
-                if (event.type == TB_EVENT_KEY || event.type == TB_EVENT_MOUSE) {
+                if (event.type == terminal::paste_start_event) {
+                    state.paste.clear();
+                    state.pasting = true;
+                } else if (event.type == terminal::paste_end_event) {
+                    if (state.pasting) {
+                        insertPaste(state);
+                        state.pasting = false;
+                    }
+                } else if (state.pasting && event.type == TB_EVENT_KEY) {
+                    appendPastedKey(state, event);
+                } else if (event.type == TB_EVENT_KEY || event.type == TB_EVENT_MOUSE) {
                     handleKey(state, api, turn, event);
                 } else if (event.type == TB_EVENT_RESIZE) {
                     state.dirty = true;
