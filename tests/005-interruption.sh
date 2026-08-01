@@ -25,3 +25,20 @@ expect_process "T5.2: continuing after tool interruption retains the call and ca
         "$mock_dir/interrupt-ready" "$mock_dir/continued" <<'STDOUT' 3<<'STDERR'
 STDOUT
 STDERR
+
+incomplete_home=$TEST_WORKDIR/incomplete-home
+write_test_credentials "$incomplete_home" || exit 1
+mock_number=$((tests_run + 2))
+mock_dir=$TEST_WORKDIR/mock-$mock_number
+expect_process "T5.3: continuing after maximum turn usage retains the partial response" 0 \
+    run_with_mock incomplete-output env CODEX_HOME="$incomplete_home" \
+        PATH="$TEST_BIN_DIR:$PATH" \
+        "$RUBY" "$TEST_DIR/continue-ui.rb" microcodex "Start incomplete response test" \
+        "$mock_dir/incomplete-ready" "$mock_dir/continued" <<'STDOUT' 3<<'STDERR'
+STDOUT
+STDERR
+
+expect_process "T5.4: maximum turn usage persists the partial response" 0 \
+    grep -q "Partial limited answer" "$incomplete_home"/conversations/*.jsonl <<'STDOUT' 3<<'STDERR'
+STDOUT
+STDERR

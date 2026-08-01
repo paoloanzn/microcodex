@@ -34,9 +34,16 @@ namespace {
     using microcodex::json::requiredJsonString;
 
     constexpr std::string_view interrupted_message = "Codex turn was interrupted";
+    constexpr std::string_view incomplete_response_prefix = "The Codex response was incomplete: ";
+    constexpr std::string_view turn_usage_limit_error =
+        "The Codex response was incomplete: max_output_tokens";
     constexpr std::string_view interrupted_guidance =
         "<turn_aborted>\n"
         "The previous turn was interrupted on purpose. Any running commands may still be running in the background. If any tools or commands were aborted, they may have partially executed.\n"
+        "</turn_aborted>";
+    constexpr std::string_view turn_usage_limit_guidance =
+        "<turn_aborted>\n"
+        "The previous response reached its maximum turn usage before it could finish. Continue from the partial response above without restarting the turn.\n"
         "</turn_aborted>";
 
     std::string makeUuid() {
@@ -106,6 +113,10 @@ namespace {
         return error.find("context window") != std::string_view::npos ||
                error.find("context_length") != std::string_view::npos ||
                error.find("maximum context") != std::string_view::npos;
+    }
+
+    bool isTurnUsageLimitError(const std::string_view error) {
+        return error == turn_usage_limit_error;
     }
 
     struct StreamState {
@@ -246,7 +257,7 @@ namespace {
                     }
                 }
             }
-            return std::unexpected("The Codex response was incomplete: " + reason);
+            return std::unexpected(std::string(incomplete_response_prefix) + reason);
         }
 
         if (*type == "error") {
@@ -508,12 +519,14 @@ namespace microcodex {
 
         auto response = requestWithToolExecution(turn_stop.get_token(), turn_id, turn_start);
         if (!response) {
-            if (turn_stop.stop_requested()) {
-                // Keep every complete response item, partial assistant text,
-                // function call, and tool output collected before cancellation.
-                // The marker is model-visible context for a later "continue",
-                // matching Codex's interrupted-turn rollout behavior.
-                input_items_.push_back(userMessageItem(interrupted_guidance));
+            const bool interrupted = turn_stop.stop_requested();
+            const bool usage_limited = isTurnUsageLimitError(response.error());
+            if (interrupted || usage_limited) {
+                // Keep every complete response item and partial assistant text.
+                // The marker makes the termination explicit to a later
+                // "continue" while preserving one durable turn boundary.
+                input_items_.push_back(userMessageItem(
+                    usage_limited ? turn_usage_limit_guidance : interrupted_guidance));
                 if (conversation_file_) {
                     const auto turn_items = std::span<const std::string>(input_items_).subspan(
                         turn_start, input_items_.size() - turn_start);
@@ -530,12 +543,14 @@ namespace microcodex {
                     .number = turn_number_,
                     .end = input_items_.size(),
                 });
-                emitEvent({.type = CodexEventType::TurnInterrupted, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = std::string(interrupted_message), .edit = {}});
-                return std::unexpected(std::string(interrupted_message));
+                const std::string terminal_message =
+                    usage_limited ? response.error() : std::string(interrupted_message);
+                emitEvent({.type = CodexEventType::TurnInterrupted, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = terminal_message, .edit = {}});
+                return std::unexpected(terminal_message);
             }
 
-            // Non-cancellation failures remain transactional: restore the last
-            // terminal turn even after successful intermediate tool rounds.
+            // Other failures remain transactional: restore the last terminal
+            // turn even after successful intermediate tool rounds.
             input_items_.resize(turn_start);
             turn_number_ = previous_turn;
             turn_state_ = previous_turn_state;
@@ -875,7 +890,9 @@ namespace microcodex {
         ModelResponse partial;
         auto sampled = performRequest(std::move(*request_body), stop_token, turn_id, true, &partial);
         if (!sampled) {
-            if (stop_token.stop_requested()) {
+            if (stop_token.stop_requested() || isTurnUsageLimitError(sampled.error())) {
+                // Both user cancellation and an API response limit leave useful
+                // model output that the next turn must see in order to continue.
                 turn_state_ = std::move(partial.turn_state);
                 reported_input_tokens_ = partial.response.input_tokens;
                 bool has_assistant_message = false;
@@ -927,14 +944,18 @@ namespace microcodex {
             .stop_token = stop_token,
         }, receiveResponseBody, receiveResponseHeader, &state);
         if (!response) {
-            if (stop_token.stop_requested()) {
-                if (partial_response != nullptr) {
-                    *partial_response = ModelResponse{
-                        .response = std::move(state.response),
-                        .output_items = std::move(state.output_items),
-                        .turn_state = std::move(state.turn_state),
-                    };
-                }
+            const bool interrupted = stop_token.stop_requested();
+            const bool usage_limited = isTurnUsageLimitError(response.error());
+            if ((interrupted || usage_limited) && partial_response != nullptr) {
+                // Cancellation and response limits are resumable: preserve all
+                // complete items and streamed text received before termination.
+                *partial_response = ModelResponse{
+                    .response = std::move(state.response),
+                    .output_items = std::move(state.output_items),
+                    .turn_state = std::move(state.turn_state),
+                };
+            }
+            if (interrupted) {
                 return std::unexpected(std::string(interrupted_message));
             }
             return std::unexpected(response.error());

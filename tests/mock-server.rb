@@ -135,6 +135,22 @@ def validate_scenario!(scenario, request_number, payload)
       assert(parsed == {"stdout" => "loaded-from-bashrc", "stderr" => "", "exit_code" => 0},
              "shell tool did not restore the user's bashrc environment")
     end
+  when "incomplete-output"
+    validate_coding_tools!(payload)
+    if request_number.zero?
+      assert(input_text(payload) == "Start incomplete response test",
+             "incomplete response scenario did not receive its first prompt")
+    else
+      input = payload.fetch("input")
+      assert(input.any? { |item| item["role"] == "assistant" &&
+                                item.dig("content", 0, "text") == "Partial limited answer" },
+             "continued request lost the limit-interrupted assistant output")
+      assert(input.any? { |item| item["role"] == "user" &&
+                                item.dig("content", 0, "text")&.include?("maximum turn usage") },
+             "continued request did not explain the response limit")
+      assert(input.last.dig("content", 0, "text") == "continue",
+             "continued request did not append the follow-up prompt")
+    end
   when "interrupt-output"
     validate_coding_tools!(payload)
     if request_number.zero?
@@ -254,6 +270,14 @@ def message_response(text, input_tokens: 10)
   )
 end
 
+def incomplete_response(text)
+  sse(
+    {type: "response.output_text.delta", delta: text},
+    {type: "response.incomplete",
+     response: {incomplete_details: {reason: "max_output_tokens"}}}
+  )
+end
+
 def text_response
   message_response("Hello, world!")
 end
@@ -322,6 +346,10 @@ def response_for(scenario, request_number)
   when "tool-shell-env"
     [200, "OK", "text/event-stream",
      request_number.zero? ? shell_env_call_response : message_response("Shell environment loaded")]
+  when "incomplete-output"
+    body = request_number.zero? ? incomplete_response("Partial limited answer") :
+                                  message_response("Continued limited answer")
+    [200, "OK", "text/event-stream", body]
   when "interrupt-output"
     [200, "OK", "text/event-stream", message_response("Continued partial answer")]
   when "interrupt-tool"
@@ -386,7 +414,7 @@ abort "usage: mock-server.rb SCENARIO PORT_FILE REQUEST_DIR" unless ARGV.length 
 scenario, port_file, request_directory = ARGV
 expected_requests = if scenario == "context-error-retry"
                       3
-                    elsif %w[tool-write tool-edit tool-shell-env compaction-resume interrupt-output interrupt-tool].include?(scenario)
+                    elsif %w[tool-write tool-edit tool-shell-env compaction-resume incomplete-output interrupt-output interrupt-tool].include?(scenario)
                       2
                     else
                       1
@@ -439,7 +467,9 @@ while request_number < expected_requests
         if scenario == "interrupt-tool" && request_number.zero?
           sleep 0.1
           File.write(File.join(request_directory, "interrupt-ready"), "ready\n")
-        elsif %w[interrupt-output interrupt-tool].include?(scenario) && request_number == 1
+        elsif scenario == "incomplete-output" && request_number.zero?
+          File.write(File.join(request_directory, "incomplete-ready"), "ready\n")
+        elsif %w[incomplete-output interrupt-output interrupt-tool].include?(scenario) && request_number == 1
           File.write(File.join(request_directory, "continued"), "continued\n")
         end
       end
