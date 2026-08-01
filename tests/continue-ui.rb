@@ -11,6 +11,11 @@ abort "usage: continue-ui.rb APP PROMPT READY CONTINUED" unless ARGV.length == 4
 
 app, prompt, ready_file, continued_file = ARGV
 
+# GitHub Actions does not set TERM for non-interactive steps. The application
+# still runs inside a real PTY here, so provide a matching terminal type when
+# the parent environment has none.
+ENV["TERM"] = "xterm-256color" if ENV["TERM"].to_s.empty?
+
 PTY.spawn(app) do |reader, writer, pid|
   drain = Thread.new do
     loop do
