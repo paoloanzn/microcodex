@@ -88,6 +88,7 @@ namespace {
         std::deque<UiEntry> transcript;
         std::string input;
         std::string status = "Ready";
+        std::string active_model;
         std::size_t input_cursor = 0;
         std::size_t transcript_bytes = 0;
         std::size_t scroll = 0;
@@ -914,6 +915,7 @@ namespace {
         } else {
             appendSpan(line, "  ", muted_foreground);
         }
+        appendSpan(line, state.active_model + "  ·  ", muted_foreground);
         appendSpan(line,
                    turn_active
                        ? "ctrl + c interrupt   ctrl + q quit"
@@ -1340,9 +1342,10 @@ namespace microcodex {
         CodexEventEmitter emitter([&pending](const CodexEvent &event) {
             pending.push(event);
         });
+        UiState state;
+        state.active_model = config.model;
         CodexApi api(std::move(config), emitter);
         TurnFuture turn;
-        UiState state;
 
         auto history = loadSavedHistory(state, api);
         if (!history) return std::unexpected(history.error());
