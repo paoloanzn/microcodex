@@ -943,7 +943,7 @@ namespace {
 
         const auto seconds = std::max<std::int64_t>(0, elapsed_milliseconds / 1000);
         appendSpan(line, " (" + std::to_string(seconds) +
-                             "s • ctrl + c to interrupt)",
+                             "s • esc / ctrl + c to interrupt)",
                    muted_foreground | TB_DIM);
         return line;
     }
@@ -958,7 +958,7 @@ namespace {
         appendSpan(line, state.active_model + "  ·  ", muted_foreground);
         appendSpan(line,
                    turn_active
-                       ? "ctrl + c interrupt   ctrl + q quit"
+                       ? "esc / ctrl + c interrupt   ctrl + q quit"
                        : "enter send   ctrl + j newline   ctrl + r reset   ctrl + d quit",
                    muted_foreground | TB_DIM);
         if (state.scroll != 0) {
@@ -1268,7 +1268,7 @@ namespace {
             state.dirty = true;
             return;
         }
-        if (event.key == TB_KEY_CTRL_C) {
+        if (event.key == TB_KEY_CTRL_C || event.key == TB_KEY_ESC) {
             if (turn.valid()) {
                 api.interrupt();
                 state.status = "Interrupting turn...";
@@ -1420,7 +1420,7 @@ namespace microcodex {
                                    std::string(tb_strerror(initialized)));
         }
         TerminalGuard terminal;
-        tb_set_input_mode(TB_INPUT_ALT | TB_INPUT_MOUSE);
+        tb_set_input_mode(TB_INPUT_ESC | TB_INPUT_MOUSE);
         const int paste_mode = terminal::enableBracketedPaste();
         if (paste_mode != TB_OK) {
             return std::unexpected("Could not enable terminal paste handling: " +

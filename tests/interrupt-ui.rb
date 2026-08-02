@@ -29,7 +29,7 @@ PTY.spawn(app) do |reader, writer, pid|
   writer.write("#{prompt}\r")
   writer.flush
   Timeout.timeout(10) { sleep 0.02 until File.exist?(ready_file) }
-  writer.write("\x03")
+  writer.write("\x1b")
   writer.flush
 
   # Keep Enter idempotently retrying while the interrupted worker winds down.
