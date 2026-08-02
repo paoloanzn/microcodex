@@ -19,9 +19,10 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'workflow_call' }}
 
 jobs:
-  build-and-test:
+  linux-build-and-test:
     name: Verify ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    container: debian:12
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -33,6 +34,93 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             architecture: aarch64
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends \
+            build-essential \
+            ca-certificates \
+            curl \
+            git \
+            libcurl4-openssl-dev \
+            libssl-dev \
+            ruby
+
+      - name: Check out source and dependencies
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Verify build baseline and architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "${{ matrix.architecture }}"
+          test "$(. /etc/os-release && printf '%s' "$VERSION_ID")" = "12"
+          test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.36"
+
+      - name: Verify installer
+        run: |
+          sh -n install.sh
+          sh -n launcher.sh
+          ./install.sh --help >/dev/null
+
+      - name: Build
+        run: make --jobs 3 all
+
+      - name: Test
+        run: make test
+
+      - name: Verify Linux ABI baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          highest_glibc="$(readelf --version-info build/microcodex | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' | sort -Vu | tail -n 1)"
+          highest_glibcxx="$(readelf --version-info build/microcodex | grep -oE 'GLIBCXX_[0-9]+(\.[0-9]+)+' | sort -Vu | tail -n 1)"
+          printf 'Highest required glibc symbol: %s\n' "${highest_glibc:-none}"
+          printf 'Highest required libstdc++ symbol: %s\n' "${highest_glibcxx:-none}"
+          test "$(printf '%s\n' GLIBC_2.36 "$highest_glibc" | sort -V | tail -n 1)" = "GLIBC_2.36"
+          test "$(printf '%s\n' GLIBCXX_3.4.30 "$highest_glibcxx" | sort -V | tail -n 1)" = "GLIBCXX_3.4.30"
+          build/microcodex --help >/dev/null
+
+      - name: Package release artifact
+        env:
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="microcodex-${TARGET}.tar.gz"
+          binary="microcodex-${TARGET}"
+          mkdir -p dist
+          cp build/microcodex "dist/${binary}"
+          chmod 755 "dist/${binary}"
+          (cd dist && sha256sum "${binary}" > "${binary}.sha256")
+          tar -C dist -czf "dist/${archive}" "${binary}"
+          (cd dist && sha256sum "${archive}" > "${archive}.sha256")
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            dist/microcodex-${{ matrix.target }}.tar.gz
+            dist/microcodex-${{ matrix.target }}.tar.gz.sha256
+            dist/microcodex-${{ matrix.target }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  macos-build-and-test:
+    name: Verify ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
           - os: macos-26
             target: aarch64-apple-darwin
             architecture: arm64
@@ -53,12 +141,6 @@ jobs:
         run: |
           set -euo pipefail
           test "$(uname -m)" = "${{ matrix.architecture }}"
-
-      - name: Install Linux build dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends build-essential libcurl4-openssl-dev libssl-dev
 
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
