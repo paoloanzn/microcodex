@@ -54,3 +54,13 @@ STDOUT
 [tool bash] {"command":"printf '%s' \"$MICROCODEX_RC_VALUE\""}
 [tool bash completed] {"stdout":"loaded-from-bashrc","stderr":"","exit_code":0}
 STDERR
+
+expect_process "T3.6: bash rejects a destructive command before execution" 0 \
+    run_with_mock tool-bash-denied env CODEX_HOME="$tool_home" PATH="$TEST_BIN_DIR:$PATH" \
+        microcodex Try a denied shell command <<'STDOUT' 3<<'STDERR'
+Dangerous command blocked
+STDOUT
+
+[tool bash] {"command":"rm -rf denylist-sentinel"}
+[tool bash failed] Error: command denied: forced file removal is blocked
+STDERR

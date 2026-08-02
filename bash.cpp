@@ -3,6 +3,8 @@
 
 #include "bash.h"
 
+#include "bash-safety.h"
+
 #include <array>
 #include <cerrno>
 #include <chrono>
@@ -339,6 +341,11 @@ namespace microcodex {
         try {
             if (cmd.empty()) {
                 return std::unexpected("command must not be empty");
+            }
+            // Block lexically recognized destructive commands before starting the user's shell,
+            // for example: `rm -rf path`, `git reset --hard`, `git clean -fd`, or `mkfs.ext4 device`.
+            if (const auto reason = deniedBashCommandReason(cmd)) {
+                return std::unexpected("command denied: " + std::string(*reason));
             }
             BashCommandResult result = runProcess(userShellContext(stop_token).command(cmd), stop_token);
             if (stop_token.stop_requested()) {

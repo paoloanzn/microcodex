@@ -135,6 +135,20 @@ def validate_scenario!(scenario, request_number, payload)
       assert(parsed == {"stdout" => "loaded-from-bashrc", "stderr" => "", "exit_code" => 0},
              "shell tool did not restore the user's bashrc environment")
     end
+  when "tool-bash-denied"
+    validate_coding_tools!(payload)
+    if request_number.zero?
+      assert(input_text(payload) == "Try a denied shell command",
+             "denied shell scenario did not receive the prompt")
+    else
+      output = payload.fetch("input").find do |item|
+        item["type"] == "function_call_output" && item["call_id"] == "call_bash_denied"
+      end
+      assert(output, "denied shell request did not contain a tool output")
+      assert(output.fetch("output") ==
+               "Error: command denied: forced file removal is blocked",
+             "dangerous shell command was not rejected by the denylist")
+    end
   when "incomplete-output"
     validate_coding_tools!(payload)
     if request_number.zero?
@@ -321,6 +335,15 @@ def shell_env_call_response
   )
 end
 
+def denied_bash_call_response
+  sse(
+    {type: "response.output_item.done",
+     item: {type: "function_call", call_id: "call_bash_denied", name: "bash",
+            arguments: JSON.generate(command: "rm -rf denylist-sentinel")}},
+    completed
+  )
+end
+
 def sleep_call_response
   sse(
     {type: "response.output_item.done",
@@ -346,6 +369,9 @@ def response_for(scenario, request_number)
   when "tool-shell-env"
     [200, "OK", "text/event-stream",
      request_number.zero? ? shell_env_call_response : message_response("Shell environment loaded")]
+  when "tool-bash-denied"
+    [200, "OK", "text/event-stream",
+     request_number.zero? ? denied_bash_call_response : message_response("Dangerous command blocked")]
   when "incomplete-output"
     body = request_number.zero? ? incomplete_response("Partial limited answer") :
                                   message_response("Continued limited answer")
@@ -414,7 +440,7 @@ abort "usage: mock-server.rb SCENARIO PORT_FILE REQUEST_DIR" unless ARGV.length 
 scenario, port_file, request_directory = ARGV
 expected_requests = if scenario == "context-error-retry"
                       3
-                    elsif %w[tool-write tool-edit tool-shell-env compaction-resume incomplete-output interrupt-output interrupt-tool].include?(scenario)
+                    elsif %w[tool-write tool-edit tool-shell-env tool-bash-denied compaction-resume incomplete-output interrupt-output interrupt-tool].include?(scenario)
                       2
                     else
                       1
