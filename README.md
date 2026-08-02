@@ -56,7 +56,12 @@ microcodex "Find the failing test, fix it, and run the relevant test suite"
 ```
 
 > [!WARNING]
-> MicroCodex is not a sandbox. Model-requested commands and file operations run with the same permissions as the MicroCodex process.
+> MicroCodex is not a sandbox. Before starting the user's shell, it applies a
+> simple lexical denylist that blocks forced file removal (`rm -f`/`rm -rf`),
+> `git reset --hard`, forced `git clean`, `git checkout --`, disk-formatting
+> tools, and shutdown commands. This guard is not a shell parser and is not a
+> complete security boundary: commands that do not match the denylist and all
+> file operations run with the same permissions as the MicroCodex process.
 
 ### Using Codex skills
 
@@ -83,7 +88,7 @@ The executable is written to `build/microcodex`. Run the test suite with `make t
 
 - MCP support is not implemented yet.
 - Text cannot currently be copied from the terminal while using MicroCodex.
-- Dangerous shell commands are not yet gated by a safe-command policy.
+- The bash safety gate is a lexical denylist, not a complete safe-command policy or sandbox; indirect or unrecognized destructive commands may not be blocked.
 
 ## Docs
 
