@@ -10,12 +10,30 @@
 #include "terminal.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 
 namespace {
 
-    // termbox has no paste event, so intercept bracketed-paste markers before
-    // its normal escape-sequence parser handles them as keys.
+    int extractMetaWordMovement(tb_event *event, std::size_t *consumed) {
+        if (global.in.len < 2 || global.in.buf[0] != '\x1b' ||
+            (global.in.buf[1] != 'b' && global.in.buf[1] != 'B' &&
+             global.in.buf[1] != 'f' && global.in.buf[1] != 'F')) {
+            return TB_ERR;
+        }
+
+        event->type = TB_EVENT_KEY;
+        event->ch = static_cast<std::uint32_t>(global.in.buf[1]);
+        event->mod = TB_MOD_ALT;
+        *consumed = 2;
+        return TB_OK;
+    }
+
+    // Termbox has no paste event, so intercept bracketed-paste markers before
+    // its normal escape-sequence parser handles them as keys. Meta-b and
+    // Meta-f also need intercepting in TB_INPUT_ESC mode: many terminals send
+    // Option+Left/Right that way, while termbox otherwise splits the sequence
+    // into a standalone Escape and an unmodified character.
     int extractPasteMarker(tb_event *event, std::size_t *consumed,
                            const char *marker, const std::size_t length,
                            const unsigned char event_type) {
@@ -31,7 +49,12 @@ namespace {
         return TB_OK;
     }
 
-    int extractBracketedPaste(tb_event *event, std::size_t *consumed) {
+    int extractCustomInput(tb_event *event, std::size_t *consumed) {
+        const int movement_result = extractMetaWordMovement(event, consumed);
+        if (movement_result != TB_ERR) {
+            return movement_result;
+        }
+
         constexpr char start[] = "\x1b[200~";
         constexpr char end[] = "\x1b[201~";
 
@@ -50,7 +73,7 @@ namespace {
 namespace microcodex::terminal {
 
     int enableBracketedPaste() {
-        const int callback_result = tb_set_func(TB_FUNC_EXTRACT_PRE, extractBracketedPaste);
+        const int callback_result = tb_set_func(TB_FUNC_EXTRACT_PRE, extractCustomInput);
         if (callback_result != TB_OK) {
             return callback_result;
         }
