@@ -46,7 +46,7 @@ curl -fsSL https://github.com/paoloanzn/microcodex/releases/latest/download/inst
 
 ### Using MicroCodex with your ChatGPT plan
 
-Run `microcodex login` and open the displayed URL in your browser. MicroCodex stores the resulting OAuth credentials under `$CODEX_HOME`, or `~/.codex` when `CODEX_HOME` is unset.
+Run `microcodex login` and open the displayed URL in your browser. On a remote or headless machine, run `microcodex login --device-auth` and enter the displayed one-time code at the verification URL. MicroCodex stores the resulting OAuth credentials under `$CODEX_HOME`, or `~/.codex` when `CODEX_HOME` is unset.
 
 You can then start an interactive session or pass a one-shot prompt:
 

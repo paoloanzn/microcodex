@@ -7,7 +7,7 @@ mkdir -p "$empty_home"
 expect_process "T1.1: help describes every CLI mode" 0 \
     env PATH="$TEST_BIN_DIR:$PATH" microcodex --help <<'STDOUT' 3<<'STDERR'
 Usage:
-  microcodex login
+  microcodex login [--device-auth]
   microcodex logout
   microcodex list
   microcodex show ID
@@ -20,7 +20,7 @@ STDERR
 expect_process "T1.2: --model requires a value" 1 \
     env PATH="$TEST_BIN_DIR:$PATH" microcodex --model <<'STDOUT' 3<<'STDERR'
 Usage:
-  microcodex login
+  microcodex login [--device-auth]
   microcodex logout
   microcodex list
   microcodex show ID

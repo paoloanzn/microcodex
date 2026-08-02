@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -715,6 +716,19 @@ namespace {
         return issuer;
     }
 
+    // OpenAI returns the polling interval as a JSON string. Parse the complete
+    // value and cap it at the lifetime of a device login so a malformed response
+    // cannot make the CLI sleep for an unreasonable amount of time.
+    std::expected<std::chrono::seconds, std::string> parsePollingInterval(const std::string_view text) {
+        std::chrono::seconds::rep seconds = 0;
+        const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), seconds);
+        if (error != std::errc{} || end != text.data() + text.size() || seconds < 0 ||
+            seconds > std::chrono::minutes(15).count() * 60) {
+            return std::unexpected("Device authorization returned an invalid polling interval");
+        }
+        return std::chrono::seconds(seconds);
+    }
+
     // Keep these parameters in lockstep with the upstream Codex login flow. The
     // offline_access scope is what permits refreshes in later sessions.
     std::string buildAuthorizationUrl(const microcodex::OAuthOptions &options, const std::string_view redirect_uri, const std::string_view code_challenge, const std::string_view state) {
@@ -878,6 +892,115 @@ namespace {
 } // namespace
 
 namespace microcodex {
+
+    // Begin the remote-friendly login flow. The auth service returns a short
+    // code for the user and an opaque ID for this process; no localhost listener
+    // or client-generated PKCE state is needed.
+    std::expected<OAuthDeviceCode, std::string> startOAuthDeviceLogin(OAuthOptions options) {
+        options.issuer = normalizedIssuer(std::move(options.issuer));
+        auto validation = validateOAuthOptions(options);
+        if (!validation) {
+            return std::unexpected(validation.error());
+        }
+
+        std::string body = "{\"client_id\":";
+        json::appendJsonString(body, options.client_id);
+        body += '}';
+        auto response = postBody(options.issuer + "/api/accounts/deviceauth/usercode", body,
+                                 "Content-Type: application/json",
+                                 options.token_request_timeout_seconds);
+        if (!response) {
+            return std::unexpected(response.error());
+        }
+        // Device authorization is feature-gated by the issuer. A 404 here means
+        // the flow is unavailable, unlike a 404 from the polling endpoint below.
+        if (response->status == 404) {
+            return std::unexpected("Device authorization is not enabled for this OAuth issuer");
+        }
+        if (response->status < 200 || response->status >= 300) {
+            return std::unexpected("Device authorization request returned HTTP " +
+                                   std::to_string(response->status));
+        }
+
+        // Codex has received both user_code and the older usercode spelling, so
+        // accept either while keeping the current spelling in outgoing requests.
+        auto device_auth_id = json::requiredJsonString(response->body, "device_auth_id");
+        auto user_code = json::requiredJsonString(response->body, "user_code");
+        if (!user_code) {
+            user_code = json::requiredJsonString(response->body, "usercode");
+        }
+        auto interval_text = json::requiredJsonString(response->body, "interval");
+        if (!device_auth_id || !user_code || !interval_text) {
+            return std::unexpected("Device authorization returned an incomplete response");
+        }
+        auto interval = parsePollingInterval(*interval_text);
+        if (!interval) {
+            return std::unexpected(interval.error());
+        }
+
+        return OAuthDeviceCode{options.issuer + "/codex/device", std::move(*user_code),
+                               std::move(*device_auth_id), *interval, std::move(options)};
+    }
+
+    // Wait for the browser-side authorization, then feed the returned code and
+    // verifier into the same token exchange used by localhost browser login.
+    std::expected<OAuthCredentials, std::string> finishOAuthDeviceLogin(
+        const OAuthDeviceCode &login, const std::chrono::seconds timeout) {
+        if (timeout <= std::chrono::seconds::zero()) {
+            return std::unexpected("Device authorization timeout must be greater than zero");
+        }
+        OAuthOptions options = login.options;
+        options.issuer = normalizedIssuer(std::move(options.issuer));
+        auto validation = validateOAuthOptions(options);
+        if (!validation) {
+            return std::unexpected(validation.error());
+        }
+
+        std::string body = "{\"device_auth_id\":";
+        json::appendJsonString(body, login.device_auth_id);
+        body += ",\"user_code\":";
+        json::appendJsonString(body, login.user_code);
+        body += '}';
+
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            auto response = postBody(options.issuer + "/api/accounts/deviceauth/token", body,
+                                     "Content-Type: application/json",
+                                     options.token_request_timeout_seconds);
+            if (!response) {
+                return std::unexpected(response.error());
+            }
+            // OpenAI uses both 403 and 404 to mean that the user has not finished
+            // in the browser yet. Respect the advertised interval, but never
+            // sleep past the one absolute deadline shared by all poll attempts.
+            if (response->status == 403 || response->status == 404) {
+                const auto now = std::chrono::steady_clock::now();
+                if (now >= deadline) {
+                    break;
+                }
+                const auto remaining =
+                    std::chrono::duration_cast<std::chrono::seconds>(deadline - now);
+                ::sleep(static_cast<unsigned>(std::min(login.interval, remaining).count()));
+                continue;
+            }
+            if (response->status < 200 || response->status >= 300) {
+                return std::unexpected("Device authorization failed with HTTP " +
+                                       std::to_string(response->status));
+            }
+
+            // In this flow the auth service creates the PKCE pair and returns the
+            // verifier only after approval. Its hosted callback URI replaces the
+            // localhost redirect used by OAuthLogin.
+            auto code = json::requiredJsonString(response->body, "authorization_code");
+            auto verifier = json::requiredJsonString(response->body, "code_verifier");
+            if (!code || !verifier) {
+                return std::unexpected("Device authorization returned an incomplete response");
+            }
+            return exchangeAuthorizationCode(options, options.issuer + "/deviceauth/callback",
+                                             *verifier, *code);
+        }
+        return std::unexpected("Device authorization timed out");
+    }
 
     // Everything that must survive between start() and finish() lives here:
     // the listening socket, the exact redirect URI, and the two per-login

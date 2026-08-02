@@ -38,6 +38,21 @@ namespace microcodex {
         long token_request_timeout_seconds = 30;
     };
 
+    // Plain state for a device login. Unlike OAuthLogin, this owns no socket or
+    // other resource: the OpenAI auth service receives the browser callback.
+    struct OAuthDeviceCode {
+        std::string verification_url;
+        std::string user_code;
+        std::string device_auth_id;
+        std::chrono::seconds interval;
+        OAuthOptions options;
+    };
+
+    std::expected<OAuthDeviceCode, std::string> startOAuthDeviceLogin(OAuthOptions options = {});
+    std::expected<OAuthCredentials, std::string> finishOAuthDeviceLogin(
+        const OAuthDeviceCode &login,
+        std::chrono::seconds timeout = std::chrono::minutes(15));
+
     // Owns the short-lived localhost callback listener and the PKCE secrets for
     // one login attempt. The object is move-only so those values cannot be
     // copied accidentally.

@@ -26,7 +26,7 @@ namespace {
 
     void printUsage(const std::string_view executable) {
         std::cout << "Usage:\n"
-                  << "  " << executable << " login\n"
+                  << "  " << executable << " login [--device-auth]\n"
                   << "  " << executable << " logout\n"
                   << "  " << executable << " list\n"
                   << "  " << executable << " show ID\n"
@@ -170,16 +170,7 @@ namespace {
         return 0;
     }
 
-    int login() {
-        auto login = microcodex::OAuthLogin::start();
-        if (!login) {
-            std::cerr << "Login failed: " << login.error() << '\n';
-            return 1;
-        }
-
-        std::cout << "Open this URL to log in:\n" << login->authorizationUrl() << "\n\n"
-                  << "Waiting for the browser callback on port " << login->callbackPort() << "...\n";
-        auto credentials = login->finish(std::chrono::minutes(5));
+    int completeLogin(const std::expected<microcodex::OAuthCredentials, std::string> &credentials) {
         if (!credentials) {
             std::cerr << "Login failed: " << credentials.error() << '\n';
             return 1;
@@ -191,6 +182,34 @@ namespace {
         }
         std::cout << "Logged in.\n";
         return 0;
+    }
+
+    int login() {
+        auto login = microcodex::OAuthLogin::start();
+        if (!login) {
+            std::cerr << "Login failed: " << login.error() << '\n';
+            return 1;
+        }
+
+        std::cout << "Open this URL to log in:\n" << login->authorizationUrl() << "\n\n"
+                  << "Waiting for the browser callback on port " << login->callbackPort() << "...\n"
+                  << "On a remote machine? Run 'microcodex login --device-auth' instead.\n";
+        return completeLogin(login->finish(std::chrono::minutes(5)));
+    }
+
+    int deviceLogin() {
+        auto login = microcodex::startOAuthDeviceLogin();
+        if (!login) {
+            std::cerr << "Login failed: " << login.error() << '\n';
+            return 1;
+        }
+
+        std::cout << "Open this URL in your browser:\n" << login->verification_url << "\n\n"
+                  << "Enter this one-time code (expires in 15 minutes):\n"
+                  << login->user_code << "\n\n"
+                  << "Continue only if you started this login in MicroCodex.\n"
+                  << "Waiting for authorization...\n";
+        return completeLogin(microcodex::finishOAuthDeviceLogin(*login));
     }
 
     int logout() {
@@ -278,7 +297,10 @@ int main(const int argc, char *argv[]) {
         return 0;
     }
     if (argc > 1 && std::string_view(argv[1]) == "login") {
-        return login();
+        if (argc == 2) return login();
+        if (argc == 3 && std::string_view(argv[2]) == "--device-auth") return deviceLogin();
+        printUsage(executable);
+        return 1;
     }
     if (argc > 1 && std::string_view(argv[1]) == "logout") {
         return logout();
