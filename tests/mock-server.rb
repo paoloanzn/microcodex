@@ -93,8 +93,8 @@ def validate_scenario!(scenario, request_number, payload)
            "multiline paste was submitted early or changed before sending")
   when "keybindings"
     validate_coding_tools!(payload)
-    assert(input_text(payload) == "alpha YXgamma!",
-           "Option+Arrow word navigation did not preserve the edited prompt")
+    assert(input_text(payload) == "alpha t1op\nmiddle2D\nbottom3",
+           "composer keybindings did not preserve the edited multiline prompt")
   when "tool-write"
     validate_coding_tools!(payload)
     if request_number.zero?

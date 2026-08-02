@@ -510,6 +510,73 @@ namespace {
         return newline == std::string_view::npos ? text.size() : newline;
     }
 
+    int visualColumn(const std::string_view text, const std::size_t start,
+                     const std::size_t end) {
+        int column = 0;
+        for (std::size_t offset = start; offset < end;) {
+            const auto [codepoint, length] = decodeCodepoint(text, offset);
+            if (length == 0) {
+                break;
+            }
+            if (codepoint == '\t') {
+                column += 4 - (column % 4);
+            } else if (codepoint != '\r' && codepoint != '\n') {
+                column += std::max(0, tb_wcwidth(codepoint));
+            }
+            offset += length;
+        }
+        return column;
+    }
+
+    std::size_t offsetAtVisualColumn(const std::string_view text,
+                                     const std::size_t start,
+                                     const std::size_t end,
+                                     const int target_column) {
+        int column = 0;
+        std::size_t offset = start;
+        while (offset < end) {
+            const auto [codepoint, length] = decodeCodepoint(text, offset);
+            if (length == 0) {
+                break;
+            }
+            int width = 0;
+            if (codepoint == '\t') {
+                width = 4 - (column % 4);
+            } else if (codepoint != '\r' && codepoint != '\n') {
+                width = std::max(0, tb_wcwidth(codepoint));
+            }
+            if (column + width > target_column) {
+                break;
+            }
+            column += width;
+            offset += length;
+        }
+        return offset;
+    }
+
+    std::size_t moveCursorVertically(const std::string_view text,
+                                     const std::size_t cursor,
+                                     const int direction) {
+        const std::size_t current_start = lineStart(text, cursor);
+        const std::size_t current_end = lineEnd(text, cursor);
+        const int column = visualColumn(text, current_start, cursor);
+
+        if (direction < 0) {
+            if (current_start == 0) {
+                return cursor;
+            }
+            const std::size_t target_end = current_start - 1;
+            const std::size_t target_start = lineStart(text, target_end);
+            return offsetAtVisualColumn(text, target_start, target_end, column);
+        }
+        if (current_end == text.size()) {
+            return cursor;
+        }
+        const std::size_t target_start = current_end + 1;
+        const std::size_t target_end = lineEnd(text, target_start);
+        return offsetAtVisualColumn(text, target_start, target_end, column);
+    }
+
     void insertCodepoint(UiState &state, const std::uint32_t codepoint) {
         char utf8[7]{};
         const int length = tb_utf8_unicode_to_char(utf8, codepoint);
@@ -1216,6 +1283,16 @@ namespace {
         state.dirty = true;
     }
 
+    void erasePreviousWord(UiState &state) {
+        if (state.input_cursor == 0) {
+            return;
+        }
+        const std::size_t start = previousWord(state.input, state.input_cursor);
+        state.input.erase(start, state.input_cursor - start);
+        state.input_cursor = start;
+        state.dirty = true;
+    }
+
     void eraseAtCursor(UiState &state) {
         if (state.input_cursor >= state.input.size()) {
             return;
@@ -1324,7 +1401,11 @@ namespace {
             return;
         }
         if (event.key == TB_KEY_BACKSPACE || event.key == TB_KEY_BACKSPACE2) {
-            eraseBeforeCursor(state);
+            if ((event.mod & TB_MOD_ALT) != 0) {
+                erasePreviousWord(state);
+            } else {
+                eraseBeforeCursor(state);
+            }
             return;
         }
         if (event.key == TB_KEY_DELETE) {
@@ -1365,8 +1446,17 @@ namespace {
             state.dirty = true;
             return;
         }
-        if (event.key == TB_KEY_PGUP || event.key == TB_KEY_ARROW_UP ||
-            event.key == TB_KEY_MOUSE_WHEEL_UP) {
+        if (event.key == TB_KEY_ARROW_UP) {
+            state.input_cursor = moveCursorVertically(state.input, state.input_cursor, -1);
+            state.dirty = true;
+            return;
+        }
+        if (event.key == TB_KEY_ARROW_DOWN) {
+            state.input_cursor = moveCursorVertically(state.input, state.input_cursor, 1);
+            state.dirty = true;
+            return;
+        }
+        if (event.key == TB_KEY_PGUP || event.key == TB_KEY_MOUSE_WHEEL_UP) {
             const std::size_t amount = event.key == TB_KEY_MOUSE_WHEEL_UP
                                            ? 3
                                            : static_cast<std::size_t>(std::max(1, tb_height() - 3));
@@ -1374,8 +1464,7 @@ namespace {
             state.dirty = true;
             return;
         }
-        if (event.key == TB_KEY_PGDN || event.key == TB_KEY_ARROW_DOWN ||
-            event.key == TB_KEY_MOUSE_WHEEL_DOWN) {
+        if (event.key == TB_KEY_PGDN || event.key == TB_KEY_MOUSE_WHEEL_DOWN) {
             const std::size_t amount = event.key == TB_KEY_MOUSE_WHEEL_DOWN
                                            ? 3
                                            : static_cast<std::size_t>(std::max(1, tb_height() - 3));

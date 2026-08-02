@@ -10,30 +10,37 @@
 #include "terminal.h"
 
 #include <algorithm>
-#include <cstdint>
 #include <cstring>
 
 namespace {
 
-    int extractMetaWordMovement(tb_event *event, std::size_t *consumed) {
-        if (global.in.len < 2 || global.in.buf[0] != '\x1b' ||
-            (global.in.buf[1] != 'b' && global.in.buf[1] != 'B' &&
-             global.in.buf[1] != 'f' && global.in.buf[1] != 'F')) {
+    int extractMetaComposerKey(tb_event *event, std::size_t *consumed) {
+        if (global.in.len < 2 || global.in.buf[0] != '\x1b') {
+            return TB_ERR;
+        }
+
+        const unsigned char key = static_cast<unsigned char>(global.in.buf[1]);
+        if (key != 'b' && key != 'B' && key != 'f' && key != 'F' &&
+            key != TB_KEY_BACKSPACE && key != TB_KEY_BACKSPACE2) {
             return TB_ERR;
         }
 
         event->type = TB_EVENT_KEY;
-        event->ch = static_cast<std::uint32_t>(global.in.buf[1]);
         event->mod = TB_MOD_ALT;
+        if (key == TB_KEY_BACKSPACE || key == TB_KEY_BACKSPACE2) {
+            event->key = key;
+        } else {
+            event->ch = key;
+        }
         *consumed = 2;
         return TB_OK;
     }
 
     // Termbox has no paste event, so intercept bracketed-paste markers before
-    // its normal escape-sequence parser handles them as keys. Meta-b and
-    // Meta-f also need intercepting in TB_INPUT_ESC mode: many terminals send
-    // Option+Left/Right that way, while termbox otherwise splits the sequence
-    // into a standalone Escape and an unmodified character.
+    // its normal escape-sequence parser handles them as keys. Meta composer
+    // keys need the same treatment in TB_INPUT_ESC mode: many terminals send
+    // Option combinations as an Escape-prefixed pair, which termbox otherwise
+    // splits into a standalone Escape and an unmodified key.
     int extractPasteMarker(tb_event *event, std::size_t *consumed,
                            const char *marker, const std::size_t length,
                            const unsigned char event_type) {
@@ -50,9 +57,9 @@ namespace {
     }
 
     int extractCustomInput(tb_event *event, std::size_t *consumed) {
-        const int movement_result = extractMetaWordMovement(event, consumed);
-        if (movement_result != TB_ERR) {
-            return movement_result;
+        const int meta_result = extractMetaComposerKey(event, consumed);
+        if (meta_result != TB_ERR) {
+            return meta_result;
         }
 
         constexpr char start[] = "\x1b[200~";

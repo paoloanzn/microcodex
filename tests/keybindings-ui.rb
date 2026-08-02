@@ -32,6 +32,13 @@ PTY.spawn(ARGV.fetch(0)) do |reader, writer, pid|
   writer.write("\x1bbX")       # Option+Left as Meta-b, then insert X.
   writer.write("\x1bf!")       # Option+Right as Meta-f, then insert !.
   writer.write("\x1b[1;3DY")   # Option+Left as a modified arrow, then insert Y.
+  writer.write("\x05\x1b\x7f") # End, then Option+Backspace removes YXgamma!.
+
+  writer.write("top\x0amiddle\x0abottom")
+  writer.write("\x1b[A2")      # Up to the end of middle, then insert 2.
+  writer.write("\x1b[A1")      # Up to the same column on the first line.
+  writer.write("\x1b[BD")      # Down to the end of the shorter middle line.
+  writer.write("\x1b[B3")      # Down to the end of the shorter bottom line.
   writer.write("\r")
   writer.flush
 
