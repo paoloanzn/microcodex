@@ -86,6 +86,7 @@ The executable is written to `build/microcodex`. Run the test suite with `make t
 
 ## Known bugs and issues
 
+- [View all issues](https://github.com/paoloanzn/microcodex/issues)
 - MCP support is not implemented yet.
 - Text cannot currently be copied from the terminal while using MicroCodex.
 - The bash safety gate is a lexical denylist, not a complete safe-command policy or sandbox; indirect or unrecognized destructive commands may not be blocked.
