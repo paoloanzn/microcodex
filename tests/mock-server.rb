@@ -164,10 +164,39 @@ def validate_scenario!(scenario, request_number, payload)
                                 item.dig("content", 0, "text") == "Partial limited answer" },
              "continued request lost the limit-interrupted assistant output")
       assert(input.any? { |item| item["role"] == "user" &&
-                                item.dig("content", 0, "text")&.include?("maximum turn usage") },
-             "continued request did not explain the response limit")
+                                item.dig("content", 0, "text")&.include?("max_output_tokens") },
+             "continued request did not preserve the response limit error")
       assert(input.last.dig("content", 0, "text") == "continue",
              "continued request did not append the follow-up prompt")
+    end
+  when "tool-round-limit"
+    validate_coding_tools!(payload)
+    input = payload.fetch("input")
+    if request_number.zero?
+      assert(input_text(payload) == "Start tool round limit test",
+             "tool round limit scenario did not receive its first prompt")
+    elsif request_number <= 64
+      previous_call_id = "call_round_#{request_number - 1}"
+      assert(input.any? { |item| item["type"] == "function_call" &&
+                                item["call_id"] == previous_call_id },
+             "tool round request lost the previous function call")
+      assert(input.any? { |item| item["type"] == "function_call_output" &&
+                                item["call_id"] == previous_call_id },
+             "tool round request lost the previous function output")
+    else
+      assert(input.any? { |item| item["type"] == "function_call" &&
+                                item["call_id"] == "call_round_64" },
+             "continued request lost the over-limit function call")
+      skipped = input.find do |item|
+        item["type"] == "function_call_output" && item["call_id"] == "call_round_64"
+      end
+      assert(skipped && skipped.fetch("output").include?("was not executed"),
+             "over-limit function call was not paired with a non-execution output")
+      assert(input.any? { |item| item["role"] == "user" &&
+                                item.dig("content", 0, "text")&.include?("maximum number of tool rounds") },
+             "continued request did not explain the tool round limit")
+      assert(input.last.dig("content", 0, "text") == "continue",
+             "tool round continuation did not append the follow-up prompt")
     end
   when "interrupt-output"
     validate_coding_tools!(payload)
@@ -357,6 +386,15 @@ def sleep_call_response
   )
 end
 
+def round_limit_call_response(request_number)
+  sse(
+    {type: "response.output_item.done",
+     item: {type: "function_call", call_id: "call_round_#{request_number}",
+            name: "missing_tool", arguments: "{}"}},
+    completed
+  )
+end
+
 def response_for(scenario, request_number)
   case scenario
   when "text" then [200, "OK", "text/event-stream", text_response]
@@ -380,6 +418,10 @@ def response_for(scenario, request_number)
   when "incomplete-output"
     body = request_number.zero? ? incomplete_response("Partial limited answer") :
                                   message_response("Continued limited answer")
+    [200, "OK", "text/event-stream", body]
+  when "tool-round-limit"
+    body = request_number <= 64 ? round_limit_call_response(request_number) :
+                                  message_response("Continued after tool round limit")
     [200, "OK", "text/event-stream", body]
   when "interrupt-output"
     [200, "OK", "text/event-stream", message_response("Continued partial answer")]
@@ -445,6 +487,8 @@ abort "usage: mock-server.rb SCENARIO PORT_FILE REQUEST_DIR" unless ARGV.length 
 scenario, port_file, request_directory = ARGV
 expected_requests = if scenario == "context-error-retry"
                       3
+                    elsif scenario == "tool-round-limit"
+                      66
                     elsif %w[tool-write tool-edit tool-shell-env tool-bash-denied compaction-resume incomplete-output interrupt-output interrupt-tool].include?(scenario)
                       2
                     else
@@ -500,6 +544,10 @@ while request_number < expected_requests
           File.write(File.join(request_directory, "interrupt-ready"), "ready\n")
         elsif scenario == "incomplete-output" && request_number.zero?
           File.write(File.join(request_directory, "incomplete-ready"), "ready\n")
+        elsif scenario == "tool-round-limit" && request_number == 64
+          File.write(File.join(request_directory, "limit-ready"), "ready\n")
+        elsif scenario == "tool-round-limit" && request_number == 65
+          File.write(File.join(request_directory, "continued"), "continued\n")
         elsif %w[incomplete-output interrupt-output interrupt-tool].include?(scenario) && request_number == 1
           File.write(File.join(request_directory, "continued"), "continued\n")
         end

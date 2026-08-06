@@ -42,3 +42,20 @@ expect_process "T5.4: maximum turn usage persists the partial response" 0 \
     grep -q "Partial limited answer" "$incomplete_home"/conversations/*.jsonl <<'STDOUT' 3<<'STDERR'
 STDOUT
 STDERR
+
+tool_limit_home=$TEST_WORKDIR/tool-limit-home
+write_test_credentials "$tool_limit_home" || exit 1
+mock_number=$((tests_run + 2))
+mock_dir=$TEST_WORKDIR/mock-$mock_number
+expect_process "T5.5: continuing after the tool round limit retains the entire turn" 0 \
+    run_with_mock tool-round-limit env CODEX_HOME="$tool_limit_home" \
+        PATH="$TEST_BIN_DIR:$PATH" \
+        "$RUBY" "$TEST_DIR/continue-ui.rb" microcodex "Start tool round limit test" \
+        "$mock_dir/limit-ready" "$mock_dir/continued" <<'STDOUT' 3<<'STDERR'
+STDOUT
+STDERR
+
+expect_process "T5.6: the tool round limited turn is persisted" 0 \
+    grep -q 'call_round_64' "$tool_limit_home"/conversations/*.jsonl <<'STDOUT' 3<<'STDERR'
+STDOUT
+STDERR
