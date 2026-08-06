@@ -32,7 +32,7 @@ namespace microcodex {
         std::string reasoning_effort = "medium";
         std::string endpoint = "https://chatgpt.com/backend-api/codex/responses";
         long idle_timeout_seconds = 300;
-        std::size_t maximum_tool_rounds = 64;
+        std::size_t maximum_tool_rounds = 128;
         std::size_t maximum_parallel_tool_calls = 32;
         std::size_t maximum_tool_output_bytes = 64 * 1024;
         // Offline fallback matching Codex's 272K unknown-model descriptor. The

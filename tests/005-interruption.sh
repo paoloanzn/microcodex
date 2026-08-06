@@ -56,6 +56,6 @@ STDOUT
 STDERR
 
 expect_process "T5.6: the tool round limited turn is persisted" 0 \
-    grep -q 'call_round_64' "$tool_limit_home"/conversations/*.jsonl <<'STDOUT' 3<<'STDERR'
+    grep -q 'call_round_128' "$tool_limit_home"/conversations/*.jsonl <<'STDOUT' 3<<'STDERR'
 STDOUT
 STDERR
