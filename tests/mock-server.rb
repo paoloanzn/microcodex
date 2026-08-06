@@ -11,6 +11,7 @@ require "timeout"
 
 MAX_REQUEST_BYTES = 1024 * 1024
 REQUEST_TIMEOUT = 10
+TOOL_ROUND_LIMIT = 128
 
 def assert(condition, message)
   raise message unless condition
@@ -175,7 +176,7 @@ def validate_scenario!(scenario, request_number, payload)
     if request_number.zero?
       assert(input_text(payload) == "Start tool round limit test",
              "tool round limit scenario did not receive its first prompt")
-    elsif request_number <= 64
+    elsif request_number <= TOOL_ROUND_LIMIT
       previous_call_id = "call_round_#{request_number - 1}"
       assert(input.any? { |item| item["type"] == "function_call" &&
                                 item["call_id"] == previous_call_id },
@@ -184,11 +185,12 @@ def validate_scenario!(scenario, request_number, payload)
                                 item["call_id"] == previous_call_id },
              "tool round request lost the previous function output")
     else
+      over_limit_call_id = "call_round_#{TOOL_ROUND_LIMIT}"
       assert(input.any? { |item| item["type"] == "function_call" &&
-                                item["call_id"] == "call_round_64" },
+                                item["call_id"] == over_limit_call_id },
              "continued request lost the over-limit function call")
       skipped = input.find do |item|
-        item["type"] == "function_call_output" && item["call_id"] == "call_round_64"
+        item["type"] == "function_call_output" && item["call_id"] == over_limit_call_id
       end
       assert(skipped && skipped.fetch("output").include?("was not executed"),
              "over-limit function call was not paired with a non-execution output")
@@ -420,8 +422,8 @@ def response_for(scenario, request_number)
                                   message_response("Continued limited answer")
     [200, "OK", "text/event-stream", body]
   when "tool-round-limit"
-    body = request_number <= 64 ? round_limit_call_response(request_number) :
-                                  message_response("Continued after tool round limit")
+    body = request_number <= TOOL_ROUND_LIMIT ? round_limit_call_response(request_number) :
+                                                message_response("Continued after tool round limit")
     [200, "OK", "text/event-stream", body]
   when "interrupt-output"
     [200, "OK", "text/event-stream", message_response("Continued partial answer")]
@@ -488,7 +490,7 @@ scenario, port_file, request_directory = ARGV
 expected_requests = if scenario == "context-error-retry"
                       3
                     elsif scenario == "tool-round-limit"
-                      66
+                      TOOL_ROUND_LIMIT + 2
                     elsif %w[tool-write tool-edit tool-shell-env tool-bash-denied compaction-resume incomplete-output interrupt-output interrupt-tool].include?(scenario)
                       2
                     else
@@ -544,9 +546,9 @@ while request_number < expected_requests
           File.write(File.join(request_directory, "interrupt-ready"), "ready\n")
         elsif scenario == "incomplete-output" && request_number.zero?
           File.write(File.join(request_directory, "incomplete-ready"), "ready\n")
-        elsif scenario == "tool-round-limit" && request_number == 64
+        elsif scenario == "tool-round-limit" && request_number == TOOL_ROUND_LIMIT
           File.write(File.join(request_directory, "limit-ready"), "ready\n")
-        elsif scenario == "tool-round-limit" && request_number == 65
+        elsif scenario == "tool-round-limit" && request_number == TOOL_ROUND_LIMIT + 1
           File.write(File.join(request_directory, "continued"), "continued\n")
         elsif %w[incomplete-output interrupt-output interrupt-tool].include?(scenario) && request_number == 1
           File.write(File.join(request_directory, "continued"), "continued\n")
