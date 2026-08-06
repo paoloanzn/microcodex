@@ -37,14 +37,12 @@ namespace {
     constexpr std::string_view incomplete_response_prefix = "The Codex response was incomplete: ";
     constexpr std::string_view turn_usage_limit_error =
         "The Codex response was incomplete: max_output_tokens";
-    constexpr std::string_view interrupted_guidance =
-        "<turn_aborted>\n"
-        "The previous turn was interrupted on purpose. Any running commands may still be running in the background. If any tools or commands were aborted, they may have partially executed.\n"
-        "</turn_aborted>";
-    constexpr std::string_view turn_usage_limit_guidance =
-        "<turn_aborted>\n"
-        "The previous response reached its maximum turn usage before it could finish. Continue from the partial response above without restarting the turn.\n"
-        "</turn_aborted>";
+    constexpr std::string_view tool_round_limit_error =
+        "Codex exceeded the maximum number of tool rounds";
+    std::string turnAbortedItem(const std::string_view error) {
+        return microcodex::userMessageItem(
+            "<turn_aborted>\n" + std::string(error) + "\n</turn_aborted>");
+    }
 
     std::string makeUuid() {
         std::array<unsigned char, 16> bytes{};
@@ -117,6 +115,10 @@ namespace {
 
     bool isTurnUsageLimitError(const std::string_view error) {
         return error == turn_usage_limit_error;
+    }
+
+    bool isToolRoundLimitError(const std::string_view error) {
+        return error == tool_round_limit_error;
     }
 
     struct StreamState {
@@ -521,12 +523,12 @@ namespace microcodex {
         if (!response) {
             const bool interrupted = turn_stop.stop_requested();
             const bool usage_limited = isTurnUsageLimitError(response.error());
-            if (interrupted || usage_limited) {
+            const bool tool_round_limited = isToolRoundLimitError(response.error());
+            if (interrupted || usage_limited || tool_round_limited) {
                 // Keep every complete response item and partial assistant text.
                 // The marker makes the termination explicit to a later
                 // "continue" while preserving one durable turn boundary.
-                input_items_.push_back(userMessageItem(
-                    usage_limited ? turn_usage_limit_guidance : interrupted_guidance));
+                input_items_.push_back(turnAbortedItem(response.error()));
                 if (conversation_file_) {
                     const auto turn_items = std::span<const std::string>(input_items_).subspan(
                         turn_start, input_items_.size() - turn_start);
@@ -543,10 +545,8 @@ namespace microcodex {
                     .number = turn_number_,
                     .end = input_items_.size(),
                 });
-                const std::string terminal_message =
-                    usage_limited ? response.error() : std::string(interrupted_message);
-                emitEvent({.type = CodexEventType::TurnInterrupted, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = terminal_message, .edit = {}});
-                return std::unexpected(terminal_message);
+                emitEvent({.type = CodexEventType::TurnInterrupted, .turn_id = turn_id, .call_id = {}, .tool_name = {}, .text = response.error(), .edit = {}});
+                return std::unexpected(response.error());
             }
 
             // Other failures remain transactional: restore the last terminal
@@ -859,7 +859,16 @@ namespace microcodex {
 
             ++tool_rounds;
             if (tool_rounds > config_.maximum_tool_rounds) {
-                return std::unexpected("Codex exceeded the maximum number of tool rounds");
+                // request() has already retained these function-call items. Pair
+                // each one with an explicit non-execution result so the saved
+                // turn remains valid input for a later continuation.
+                for (const CodexToolCall &call : response->tool_calls) {
+                    input_items_.push_back(toolOutputItem({
+                        call.call_id,
+                        "Error: Tool call was not executed because Codex exceeded the maximum number of tool rounds",
+                    }));
+                }
+                return std::unexpected(std::string(tool_round_limit_error));
             }
 
             auto results = executeToolCalls(response->tool_calls, stop_token, turn_id);
