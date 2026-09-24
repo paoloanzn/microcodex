@@ -809,6 +809,10 @@ namespace microcodex {
         struct ToolTask {
             std::future<ToolExecutionResult> future;
             std::stop_source stop_source;
+            // Anchors the task's timeout deadline: with several stuck tools,
+            // waiting a fresh `timeout` per task would let the turn take up to
+            // N x timeout, so each task waits only until its own deadline.
+            std::chrono::steady_clock::time_point start_time{};
         };
         std::vector<ToolTask> tasks;
         tasks.reserve(calls.size());
@@ -829,6 +833,7 @@ namespace microcodex {
                 });
                 ToolTask task;
                 const std::stop_token task_token = task.stop_source.get_token();
+                task.start_time = std::chrono::steady_clock::now();
                 task.future = std::async(std::launch::async, [tools, call, task_token, maximum_output_bytes] {
                     return executeToolCall(tools, call, task_token, maximum_output_bytes);
                 });
@@ -854,8 +859,11 @@ namespace microcodex {
         results.reserve(calls.size());
         for (std::size_t index = 0; index < tasks.size(); ++index) {
             ToolExecutionResult result;
+            // The deadline is anchored at the task's launch, not at the moment
+            // this loop reaches it: otherwise parallel stuck tools would each
+            // consume a full timeout and the turn could take N x timeout.
             const bool timed_out = timeout.count() > 0 &&
-                                   tasks[index].future.wait_for(timeout) == std::future_status::timeout;
+                                   tasks[index].future.wait_until(tasks[index].start_time + timeout) == std::future_status::timeout;
             if (timed_out) {
                 // Ask the stuck tool to stop, then report the timeout without
                 // waiting for it: the turn must never wedge behind a hung tool

@@ -38,10 +38,11 @@ namespace microcodex {
         std::size_t maximum_tool_rounds = 128;
         std::size_t maximum_parallel_tool_calls = 32;
         std::size_t maximum_tool_output_bytes = 64 * 1024;
-        // Maximum wall-clock time for a single tool call. When a call exceeds
-        // it, the call is reported as a timeout error and its worker is asked
-        // to stop, so a stuck tool can never wedge the turn. Zero disables the
-        // timeout. Tunable at runtime with MICROCODEX_TOOL_EXECUTION_TIMEOUT_SECONDS.
+        // Maximum wall-clock time for a single tool call, measured from when the
+        // call starts, so parallel stuck calls cannot stack their timeouts.
+        // When a call exceeds it, the call is reported as a timeout error and
+        // its worker is asked to stop, so a stuck tool can never wedge the
+        // turn. Zero disables the timeout. Tunable at runtime with MICROCODEX_TOOL_EXECUTION_TIMEOUT_SECONDS.
         std::size_t tool_execution_timeout_seconds = 120;
         // Offline fallback matching Codex's 272K unknown-model descriptor. The
         // real values are queried from /models before an online run. Keeping an
