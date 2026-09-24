@@ -65,6 +65,17 @@ def validate_coding_tools!(payload)
          "request did not advertise the coding tools")
 end
 
+def validate_sub_agent_tools!(payload, expected)
+  tool_names = payload.fetch("tools").map { |tool| tool["name"] }
+  assert(tool_names.include?("sub_agent") == expected,
+         "sub-agent tool advertisement did not match the request")
+  if expected
+    tool = payload.fetch("tools").find { |candidate| candidate["name"] == "sub_agent" }
+    assert(tool.fetch("parameters").fetch("required") == %w[prompt timeout_ms],
+           "sub-agent tool schema did not require prompt and timeout")
+  end
+end
+
 def input_text(payload)
   payload.dig("input", 0, "content", 0, "text")
 end
@@ -110,6 +121,24 @@ def validate_scenario!(scenario, request_number, payload)
                                          "call_id" => "call_write",
                                          "output" => "Created result.txt"} },
              "second request did not contain the real tool output")
+    end
+  when "sub-agent"
+    validate_coding_tools!(payload)
+    if request_number.zero?
+      validate_sub_agent_tools!(payload, true)
+      assert(input_text(payload) == "Ask a child agent",
+             "sub-agent scenario did not receive the parent prompt")
+    elsif request_number == 1
+      validate_sub_agent_tools!(payload, false)
+      assert(input_text(payload) == "Child task",
+             "sub-agent request did not receive the child prompt")
+    else
+      validate_sub_agent_tools!(payload, true)
+      output = payload.fetch("input").find do |item|
+        item["type"] == "function_call_output" && item["call_id"] == "call_sub_agent"
+      end
+      assert(output && output["output"] == "Child result",
+             "parent request did not contain the child result")
     end
   when "tool-edit"
     validate_coding_tools!(payload)
@@ -341,6 +370,15 @@ def tool_call_response
   )
 end
 
+def sub_agent_call_response
+  sse(
+    {type: "response.output_item.done",
+     item: {type: "function_call", call_id: "call_sub_agent", name: "sub_agent",
+            arguments: JSON.generate(prompt: "Child task", timeout_ms: 1_000)}},
+    completed
+  )
+end
+
 def tool_final_response
   sse(
     {type: "response.output_item.done",
@@ -408,6 +446,13 @@ def response_for(scenario, request_number)
   when "tool-write"
     [200, "OK", "text/event-stream",
      request_number.zero? ? tool_call_response : tool_final_response]
+  when "sub-agent"
+    body = case request_number
+           when 0 then sub_agent_call_response
+           when 1 then message_response("Child result")
+           else message_response("Parent received child result")
+           end
+    [200, "OK", "text/event-stream", body]
   when "tool-edit"
     [200, "OK", "text/event-stream",
      request_number.zero? ? edit_call_response : message_response("Edited edit-target.txt")]
@@ -491,6 +536,8 @@ expected_requests = if scenario == "context-error-retry"
                       3
                     elsif scenario == "tool-round-limit"
                       TOOL_ROUND_LIMIT + 2
+                    elsif scenario == "sub-agent"
+                      3
                     elsif %w[tool-write tool-edit tool-shell-env tool-bash-denied compaction-resume incomplete-output interrupt-output interrupt-tool].include?(scenario)
                       2
                     else

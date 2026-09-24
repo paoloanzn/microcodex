@@ -22,6 +22,7 @@
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -78,6 +79,34 @@ namespace {
         if (error != std::errc{} || parsed_end != end) return std::nullopt;
         return result;
     }
+
+    class SubAgentTool final : public microcodex::ToolBase {
+    public:
+        using Runner = std::function<std::expected<microcodex::ToolResult, std::string>(std::string, std::size_t, std::stop_token)>;
+
+        explicit SubAgentTool(Runner runner) : runner_(std::move(runner)) {}
+
+        std::string_view name() const override { return "sub_agent"; }
+
+        std::string toJsonString() const override {
+            return microcodex::detail::toolJsonString(
+                name(),
+                "Run a separate coding agent with a prompt and return its result.",
+                R"({"type":"object","properties":{"prompt":{"type":"string"},"timeout_ms":{"type":"integer","minimum":1}},"required":["prompt","timeout_ms"],"additionalProperties":false})");
+        }
+
+        std::expected<microcodex::ToolResult, std::string> executeJson(const std::string_view arguments, const std::stop_token stop_token) const override {
+            auto prompt = microcodex::ToolArguments{arguments}.string("prompt");
+            auto timeout_ms = microcodex::ToolArguments{arguments}.size("timeout_ms");
+            if (!prompt) return std::unexpected(prompt.error());
+            if (!timeout_ms) return std::unexpected(timeout_ms.error());
+            if (stop_token.stop_requested()) return std::unexpected("Tool execution interrupted");
+            return runner_(std::move(*prompt), *timeout_ms, stop_token);
+        }
+
+    private:
+        Runner runner_;
+    };
 
     std::string currentTimestamp() {
         const std::time_t now = std::chrono::system_clock::to_time_t(
@@ -416,7 +445,16 @@ namespace microcodex {
         : config_(std::move(config)),
           compactor_(config_.compaction),
           installation_id_(makeUuid()),
-          session_id_(makeUuid()) {}
+          session_id_(makeUuid()) {
+        const auto existing = std::find_if(config_.tools.begin(), config_.tools.end(), [](const auto &tool) {
+            return tool != nullptr && tool->name() == "sub_agent";
+        });
+        if (config_.enable_sub_agent_tool && existing == config_.tools.end()) {
+            config_.tools.emplace_back(std::make_shared<SubAgentTool>([this](std::string prompt, std::size_t timeout_ms, std::stop_token stop_token) {
+                return runSubAgent(std::move(prompt), timeout_ms, stop_token);
+            }));
+        }
+    }
 
     CodexApi::CodexApi(CodexApiConfig config, CodexEventEmitter &events) : CodexApi(std::move(config)) {
         events_ = &events;
@@ -755,6 +793,51 @@ namespace microcodex {
         } catch (...) {
             return {{call.call_id, "Error: Tool threw an unknown exception"}, {}, false};
         }
+    }
+
+    std::expected<ToolResult, std::string> CodexApi::runSubAgent(std::string prompt, const std::size_t timeout_ms, const std::stop_token stop_token) const {
+        if (prompt.empty()) return std::unexpected("Sub-agent prompt cannot be empty");
+        if (timeout_ms == 0) return std::unexpected("Sub-agent timeout_ms must be greater than zero");
+        if (stop_token.stop_requested()) return std::unexpected("Tool execution interrupted");
+
+        CodexApiConfig child_config = config_;
+        child_config.persist_conversation = false;
+        child_config.enable_sub_agent_tool = false;
+        child_config.resume_conversation.reset();
+        child_config.tools.erase(std::remove_if(child_config.tools.begin(), child_config.tools.end(), [](const auto &tool) {
+            return tool != nullptr && tool->name() == "sub_agent";
+        }), child_config.tools.end());
+
+        auto child = std::make_shared<CodexApi>(std::move(child_config));
+        std::promise<std::expected<CodexApiResponse, std::string>> promise;
+        auto result = promise.get_future();
+        std::thread worker([child, prompt = std::move(prompt), promise = std::move(promise)]() mutable {
+            try {
+                promise.set_value(child->sendUserMessage(prompt));
+            } catch (const std::exception &error) {
+                promise.set_value(std::unexpected(std::string("Sub-agent failed: ") + error.what()));
+            } catch (...) {
+                promise.set_value(std::unexpected("Sub-agent failed with an unknown exception"));
+            }
+        });
+
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        while (result.wait_for(std::chrono::milliseconds(25)) != std::future_status::ready) {
+            if (stop_token.stop_requested()) {
+                child->interrupt();
+                worker.join();
+                return std::unexpected("Tool execution interrupted");
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                child->interrupt();
+                worker.join();
+                return std::unexpected("Sub-agent timed out after " + std::to_string(timeout_ms) + " ms");
+            }
+        }
+        worker.join();
+        auto response = result.get();
+        if (!response) return std::unexpected(response.error());
+        return ToolResult{std::move(response->text), {}};
     }
 
     std::expected<std::vector<CodexApi::ToolExecutionResult>, std::string> CodexApi::executeToolCalls(const std::span<const CodexToolCall> calls, const std::stop_token stop_token, const std::string_view turn_id) const {
