@@ -348,8 +348,11 @@ namespace {
         auto compact_at = applySizeEnvironment("MICROCODEX_COMPACT_AT_TOKENS",
                                                config.compaction.compact_at_tokens);
         if (!compact_at) return compact_at;
-        return applySizeEnvironment("MICROCODEX_RETAINED_CONTEXT_TOKENS",
-                                    config.compaction.retained_context_tokens);
+        auto retained = applySizeEnvironment("MICROCODEX_RETAINED_CONTEXT_TOKENS",
+                                             config.compaction.retained_context_tokens);
+        if (!retained) return retained;
+        return applySizeEnvironment("MICROCODEX_TOOL_EXECUTION_TIMEOUT_SECONDS",
+                                    config.tool_execution_timeout_seconds);
     }
 
     std::expected<void, std::string> applyEffortEnvironment(microcodex::CodexApiConfig &config, const bool effort_explicit) {
