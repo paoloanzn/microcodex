@@ -588,6 +588,35 @@ namespace {
         state.dirty = true;
     }
 
+    bool isInvisiblePasteCodepoint(const std::uint32_t codepoint) {
+        // Keep pasted control and format characters out of termbox's display
+        // buffer. They remain in the pending paste and are restored on send.
+        if ((codepoint < 0x20 && codepoint != '\r' && codepoint != '\n' &&
+             codepoint != '\t') ||
+            (codepoint >= 0x7f && codepoint <= 0x9f)) {
+            return true;
+        }
+        return codepoint == 0x00ad || codepoint == 0x061c ||
+               (codepoint >= 0x200b && codepoint <= 0x200f) ||
+               (codepoint >= 0x202a && codepoint <= 0x202e) ||
+               (codepoint >= 0x2060 && codepoint <= 0x206f) ||
+               codepoint == 0xfeff;
+    }
+
+    bool pasteNeedsSafeDisplay(const std::string_view paste) {
+        for (std::size_t offset = 0; offset < paste.size();) {
+            const auto [codepoint, length] = decodeCodepoint(paste, offset);
+            if (length == 0) {
+                return true;
+            }
+            if (isInvisiblePasteCodepoint(codepoint)) {
+                return true;
+            }
+            offset += length;
+        }
+        return false;
+    }
+
     void insertPaste(UiState &state) {
         for (std::size_t position = state.paste.find('\r');
              position != std::string::npos;
@@ -602,7 +631,8 @@ namespace {
             state.paste.begin(), state.paste.end(),
             [](const unsigned char byte) { return (byte & 0xc0) != 0x80; });
         std::string displayed;
-        if (character_count > large_paste_character_threshold) {
+        if (character_count > large_paste_character_threshold ||
+            pasteNeedsSafeDisplay(state.paste)) {
             const std::string base = "[Pasted Content " +
                                      std::to_string(character_count) + " chars]";
             displayed = base;
