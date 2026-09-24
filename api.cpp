@@ -811,6 +811,12 @@ namespace microcodex {
         auto child = std::make_shared<CodexApi>(std::move(child_config));
         std::promise<std::expected<CodexApiResponse, std::string>> promise;
         auto result = promise.get_future();
+        const auto started = std::chrono::steady_clock::now();
+        const auto maximum_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::time_point::max() - started).count();
+        const auto deadline = timeout_ms > static_cast<std::size_t>(maximum_ms)
+                                  ? std::chrono::steady_clock::time_point::max()
+                                  : started + std::chrono::milliseconds(static_cast<std::chrono::milliseconds::rep>(timeout_ms));
         std::thread worker([child, prompt = std::move(prompt), promise = std::move(promise)]() mutable {
             try {
                 promise.set_value(child->sendUserMessage(prompt));
@@ -821,18 +827,27 @@ namespace microcodex {
             }
         });
 
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-        while (result.wait_for(std::chrono::milliseconds(25)) != std::future_status::ready) {
+        // A tool that ignores its stop token can keep the child turn blocked.
+        // The worker owns the child and promise, so it can safely finish after
+        // this call returns without keeping the parent turn blocked.
+        auto cancel = [&](std::string error) -> std::expected<ToolResult, std::string> {
+            child->shutdown();
+            worker.detach();
+            return std::unexpected(std::move(error));
+        };
+        while (true) {
             if (stop_token.stop_requested()) {
-                child->interrupt();
-                worker.join();
-                return std::unexpected("Tool execution interrupted");
+                return cancel("Tool execution interrupted");
             }
-            if (std::chrono::steady_clock::now() >= deadline) {
-                child->interrupt();
-                worker.join();
-                return std::unexpected("Sub-agent timed out after " + std::to_string(timeout_ms) + " ms");
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                return cancel("Sub-agent timed out after " + std::to_string(timeout_ms) + " ms");
             }
+            if (result.wait_until(std::min(deadline, now + std::chrono::milliseconds(25))) == std::future_status::ready) break;
+        }
+        if (stop_token.stop_requested()) return cancel("Tool execution interrupted");
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return cancel("Sub-agent timed out after " + std::to_string(timeout_ms) + " ms");
         }
         worker.join();
         auto response = result.get();

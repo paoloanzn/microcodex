@@ -77,6 +77,8 @@ During a coding turn, the agent also has a `sub_agent` tool. It accepts a
 same authentication and model configuration, and returns the child response.
 The child cannot recursively spawn another sub-agent. Timeout and child
 execution errors are returned as tool errors so the parent can recover.
+A timed-out child is asked to stop; a tool that ignores cancellation may keep
+running in the background.
 
 ### Building from source
 
