@@ -70,24 +70,21 @@ namespace microcodex {
             return lowered_haystack.find(lowered_needle) != std::string::npos;
         }
 
+        // Narrow markers only: broad strings like "libressl", "ssl routines",
+        // or generic "alert" would also match permanent certificate/handshake failures.
         bool detailLooksLikeTransientTls(std::string_view detail) {
             return containsInsensitive(detail, "ssl_read") ||
                    containsInsensitive(detail, "ssl_write") ||
                    containsInsensitive(detail, "bad record mac") ||
-                   containsInsensitive(detail, "sslv3 alert") ||
-                   containsInsensitive(detail, "libressl") ||
-                   containsInsensitive(detail, "ssl routines") ||
                    containsInsensitive(detail, "decryption_failed") ||
                    containsInsensitive(detail, "decryption failed") ||
-                   containsInsensitive(detail, "unexpected eof while reading") ||
-                   containsInsensitive(detail, "ssl/tls alert");
+                   containsInsensitive(detail, "unexpected eof while reading");
         }
 
         bool isRetryableCurlCode(const CURLcode result) {
             switch (result) {
             case CURLE_RECV_ERROR:
             case CURLE_SEND_ERROR:
-            case CURLE_SSL_CONNECT_ERROR:
             case CURLE_GOT_NOTHING:
             case CURLE_PARTIAL_FILE:
             case CURLE_OPERATION_TIMEDOUT:
@@ -100,7 +97,12 @@ namespace microcodex {
         }
 
         bool isTransientTransportFailure(const CURLcode result, std::string_view detail) {
-            if (detailLooksLikeTransientTls(detail)) return true;
+            // Handshake/connect TLS errors are often permanent (certs, protocol).
+            // Only treat CURLE_SSL_CONNECT_ERROR as transient when detail has a
+            // narrow retryable indicator; other CURLcodes keep their own rules.
+            if (result == CURLE_SSL_CONNECT_ERROR) {
+                return detailLooksLikeTransientTls(detail);
+            }
             return isRetryableCurlCode(result);
         }
 
@@ -206,10 +208,11 @@ namespace microcodex {
             return state.request.stop_token.stop_requested() ? 1 : 0;
         }
 
-        std::expected<HttpResponse, std::string> performHttpRequestOnce(const HttpRequest &request, const HttpDataHandler body_handler, const HttpDataHandler header_handler, void *user_data, std::string &transport_detail, CURLcode &transport_code, std::size_t &body_bytes_received) {
+        std::expected<HttpResponse, std::string> performHttpRequestOnce(const HttpRequest &request, const HttpDataHandler body_handler, const HttpDataHandler header_handler, void *user_data, std::string &transport_detail, CURLcode &transport_code, std::size_t &body_bytes_received, bool &request_sent, long attempt_total_timeout_seconds) {
             transport_detail.clear();
             transport_code = CURLE_OK;
             body_bytes_received = 0;
+            request_sent = false;
 
             std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), &curl_easy_cleanup);
             if (!curl) return std::unexpected("Could not create HTTP request");
@@ -263,20 +266,27 @@ namespace microcodex {
                 (!setOption(CURLOPT_LOW_SPEED_LIMIT, 1L) || !setOption(CURLOPT_LOW_SPEED_TIME, request.idle_timeout_seconds))) {
                 return std::unexpected("Could not configure HTTP idle timeout");
             }
-            if (request.total_timeout_seconds > 0 && !setOption(CURLOPT_TIMEOUT, request.total_timeout_seconds)) {
+            if (attempt_total_timeout_seconds > 0 && !setOption(CURLOPT_TIMEOUT, attempt_total_timeout_seconds)) {
                 return std::unexpected("Could not configure HTTP timeout");
             }
 
             if (consumeTestTransientTlsFailure(transport_detail)) {
+                // Failure injected before curl_easy_perform: request never left the client.
                 transport_code = CURLE_RECV_ERROR;
                 body_bytes_received = state.body_bytes_received;
+                request_sent = false;
                 return std::unexpected("HTTP request failed: " + transport_detail);
             }
 
             const CURLcode result = curl_easy_perform(curl.get());
             long status = 0;
+            curl_off_t uploaded_bytes = 0;
             curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &status);
+            curl_easy_getinfo(curl.get(), CURLINFO_SIZE_UPLOAD_T, &uploaded_bytes);
             body_bytes_received = state.body_bytes_received;
+            // POST is only safe to auto-retry when nothing was uploaded and the
+            // server never produced a status line (request not known to be sent).
+            request_sent = uploaded_bytes > 0 || status > 0;
 
             if (request.stop_token.stop_requested()) return std::unexpected("HTTP request interrupted");
             if (!state.error.empty()) return std::unexpected(std::move(state.error));
@@ -312,13 +322,26 @@ namespace microcodex {
         std::string transport_detail;
         CURLcode transport_code = CURLE_OK;
         std::size_t body_bytes_received = 0;
+        bool request_sent = false;
         std::expected<HttpResponse, std::string> last_failure = std::unexpected("HTTP request failed");
+
+        const bool has_total_timeout = request.total_timeout_seconds > 0;
+        const auto overall_deadline = has_total_timeout
+                                          ? std::chrono::steady_clock::now() + std::chrono::seconds(request.total_timeout_seconds)
+                                          : std::chrono::steady_clock::time_point::max();
 
         for (int attempt = 0; attempt < max_http_attempts; ++attempt) {
             if (request.stop_token.stop_requested()) return std::unexpected("HTTP request interrupted");
 
+            long attempt_timeout_seconds = 0;
+            if (has_total_timeout) {
+                const auto remaining = std::chrono::duration_cast<std::chrono::seconds>(overall_deadline - std::chrono::steady_clock::now());
+                if (remaining.count() <= 0) break;
+                attempt_timeout_seconds = remaining.count();
+            }
+
             appendAttemptLog("attempt " + std::to_string(attempt + 1));
-            auto response = performHttpRequestOnce(request, body_handler, header_handler, user_data, transport_detail, transport_code, body_bytes_received);
+            auto response = performHttpRequestOnce(request, body_handler, header_handler, user_data, transport_detail, transport_code, body_bytes_received, request_sent, attempt_timeout_seconds);
             if (response) return response;
 
             last_failure = std::unexpected(response.error());
@@ -327,7 +350,12 @@ namespace microcodex {
 
             // Callback/configuration errors and partial streams are not retried.
             const bool transport_failure = !transport_detail.empty() || transport_code != CURLE_OK;
-            if (!transport_failure || body_bytes_received > 0) {
+            // GET is idempotent when no response body arrived. POST is only
+            // retried when curl shows the request was never sent.
+            const bool safe_to_replay =
+                body_bytes_received == 0 &&
+                (request.method == HttpMethod::Get || !request_sent);
+            if (!transport_failure || !safe_to_replay) {
                 if (transport_failure && detailLooksLikeTransientTls(transport_detail)) {
                     return std::unexpected(httpTransportFailureMessage(transport_detail));
                 }
@@ -345,11 +373,15 @@ namespace microcodex {
 
             const auto delay = initial_retry_delay * (1 << attempt);
             appendAttemptLog("retry-backoff-ms " + std::to_string(delay.count()));
-            const auto deadline = std::chrono::steady_clock::now() + delay;
-            while (std::chrono::steady_clock::now() < deadline) {
+            auto backoff_deadline = std::chrono::steady_clock::now() + delay;
+            if (has_total_timeout && backoff_deadline > overall_deadline) {
+                backoff_deadline = overall_deadline;
+            }
+            while (std::chrono::steady_clock::now() < backoff_deadline) {
                 if (request.stop_token.stop_requested()) return std::unexpected("HTTP request interrupted");
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
+            if (has_total_timeout && std::chrono::steady_clock::now() >= overall_deadline) break;
         }
 
         if (detailLooksLikeTransientTls(transport_detail)) {

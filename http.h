@@ -48,7 +48,9 @@ namespace microcodex {
     // Performs one synchronous request. Callers may consume body and header
     // chunks as they arrive; a bounded body copy is retained for errors and
     // non-streaming responses. Transient TLS/network failures are retried with
-    // exponential backoff when no response body bytes have been delivered yet.
+    // exponential backoff within the configured total timeout: GET when no
+    // response body bytes have arrived yet, and POST only when the request is
+    // known not to have been sent.
     std::expected<HttpResponse, std::string> performHttpRequest(const HttpRequest &request, HttpDataHandler body_handler = nullptr, HttpDataHandler header_handler = nullptr, void *user_data = nullptr);
 
 } // namespace microcodex

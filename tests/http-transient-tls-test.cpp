@@ -37,6 +37,12 @@ int main() {
            "application HTTP errors should not be classified as transient TLS");
     expect(!isTransientHttpTransportError("Could not resolve host"),
            "unrelated curl errors without TLS markers should not match TLS classifier");
+    expect(!isTransientHttpTransportError("error:0A000086:SSL routines:tls_process_server_certificate:certificate verify failed"),
+           "certificate verify failures must not match via broad SSL routines text");
+    expect(!isTransientHttpTransportError("LibreSSL/3.3.6: handshake failure"),
+           "mere LibreSSL backend mention must not be classified as transient");
+    expect(!isTransientHttpTransportError("sslv3 alert handshake failure"),
+           "generic sslv3 alert without a narrow transient marker must not match");
 
     const std::string sanitized = httpTransportFailureMessage(libressl_bad_mac);
     expect(sanitized == "HTTP request failed: transient TLS connection error",
