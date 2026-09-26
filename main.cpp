@@ -379,8 +379,11 @@ int main(const int argc, char *argv[]) {
 
     auto config = microcodex::makeCodingAgentConfig(std::move(request->model));
     if (!request->effort_explicit) {
-        if (const char *env_effort = std::getenv("MICROCODEX_EFFORT");
-            env_effort != nullptr && env_effort[0] != '\0') {
+        if (const char *env_effort = std::getenv("MICROCODEX_EFFORT")) {
+            if (env_effort[0] == '\0') {
+                std::cerr << "MICROCODEX_EFFORT must not be empty\n";
+                return 1;
+            }
             if (!isValidEffort(env_effort)) {
                 std::cerr << "MICROCODEX_EFFORT must be one of: minimal, low, medium, high\n";
                 return 1;
