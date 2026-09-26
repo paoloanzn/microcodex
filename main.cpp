@@ -23,6 +23,7 @@
 namespace {
 
     constexpr std::string_view default_model = "gpt-5.6-sol";
+    constexpr std::string_view default_effort = "medium";
 
     void printUsage(const std::string_view executable) {
         std::cout << "Usage:\n"
@@ -30,14 +31,20 @@ namespace {
                   << "  " << executable << " logout\n"
                   << "  " << executable << " list\n"
                   << "  " << executable << " show ID\n"
-                  << "  " << executable << " [--model MODEL] resume ID [PROMPT]\n"
-                  << "  " << executable << " [--model MODEL]\n"
-                  << "  " << executable << " [--model MODEL] PROMPT\n";
+                  << "  " << executable << " [--model MODEL] [--effort EFFORT] resume ID [PROMPT]\n"
+                  << "  " << executable << " [--model MODEL] [--effort EFFORT]\n"
+                  << "  " << executable << " [--model MODEL] [--effort EFFORT] PROMPT\n";
+    }
+
+    bool isValidEffort(const std::string_view value) {
+        return value == "minimal" || value == "low" || value == "medium" || value == "high";
     }
 
     struct AgentRequest {
         std::string model;
         bool model_explicit;
+        std::string effort;
+        bool effort_explicit;
         std::optional<std::string> prompt;
         std::optional<std::string> resume_id;
     };
@@ -45,6 +52,8 @@ namespace {
     std::expected<AgentRequest, std::string> parseAgentRequest(const int argc, char *argv[]) {
         std::string model(default_model);
         bool model_explicit = false;
+        std::string effort(default_effort);
+        bool effort_explicit = false;
         int argument = 1;
         if (argument < argc && std::string_view(argv[argument]) == "--model") {
             if (++argument == argc || std::string_view(argv[argument]).empty()) {
@@ -52,6 +61,16 @@ namespace {
             }
             model = argv[argument++];
             model_explicit = true;
+        }
+        if (argument < argc && std::string_view(argv[argument]) == "--effort") {
+            if (++argument == argc || std::string_view(argv[argument]).empty()) {
+                return std::unexpected("--effort requires a value");
+            }
+            effort = argv[argument++];
+            effort_explicit = true;
+            if (!isValidEffort(effort)) {
+                return std::unexpected("--effort must be one of: minimal, low, medium, high");
+            }
         }
         std::optional<std::string> resume_id;
         if (argument < argc && std::string_view(argv[argument]) == "resume") {
@@ -72,6 +91,8 @@ namespace {
         return AgentRequest{
             .model = std::move(model),
             .model_explicit = model_explicit,
+            .effort = std::move(effort),
+            .effort_explicit = effort_explicit,
             .prompt = prompt.empty() ? std::nullopt
                                      : std::optional<std::string>(std::move(prompt)),
             .resume_id = std::move(resume_id),
@@ -357,11 +378,19 @@ int main(const int argc, char *argv[]) {
     }
 
     auto config = microcodex::makeCodingAgentConfig(std::move(request->model));
+    if (!request->effort_explicit) {
+        if (const char *env_effort = std::getenv("MICROCODEX_EFFORT");
+            env_effort != nullptr && env_effort[0] != '\0') {
+            if (!isValidEffort(env_effort)) {
+                std::cerr << "MICROCODEX_EFFORT must be one of: minimal, low, medium, high\n";
+                return 1;
+            }
+            request->effort = env_effort;
+        }
+    }
+    config.reasoning_effort = std::move(request->effort);
     config.resume_conversation = std::move(resume_path);
     microcodex::applyOAuthCredentials(config, **credentials);
-    // Keep transport selection at the executable boundary so black-box tests
-    // can exercise the real CLI against a deterministic loopback server. The
-    // default remains the production Codex endpoint.
     if (const char *endpoint = std::getenv("MICROCODEX_API_ENDPOINT");
         endpoint != nullptr && endpoint[0] != '\0') {
         config.endpoint = endpoint;
