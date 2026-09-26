@@ -168,6 +168,20 @@ def validate_scenario!(scenario, request_number, payload)
                "Error: command denied: forced file removal is blocked",
              "dangerous shell command was not rejected by the denylist")
     end
+  when "tool-timeout"
+    validate_coding_tools!(payload)
+    if request_number.zero?
+      assert(input_text(payload) == "Run a slow shell command",
+             "timeout scenario did not receive the prompt")
+    else
+      output = payload.fetch("input").find do |item|
+        item["type"] == "function_call_output" && item["call_id"] == "call_slow"
+      end
+      assert(output, "timeout request did not contain a tool output")
+      assert(output.fetch("output") ==
+               "Error: Tool execution timed out after 2 seconds",
+             "slow tool call did not time out with the expected error")
+    end
   when "incomplete-output"
     validate_coding_tools!(payload)
     if request_number.zero?
@@ -402,6 +416,15 @@ def sleep_call_response
   )
 end
 
+def timeout_call_response
+  sse(
+    {type: "response.output_item.done",
+     item: {type: "function_call", call_id: "call_slow", name: "bash",
+            arguments: JSON.generate(command: "sleep 30")}},
+    completed
+  )
+end
+
 def round_limit_call_response(request_number)
   sse(
     {type: "response.output_item.done",
@@ -448,6 +471,9 @@ def response_for(scenario, request_number)
   when "tool-bash-denied"
     [200, "OK", "text/event-stream",
      request_number.zero? ? denied_bash_call_response : message_response("Dangerous command blocked")]
+  when "tool-timeout"
+    [200, "OK", "text/event-stream",
+     request_number.zero? ? timeout_call_response : message_response("Slow command timed out")]
   when "incomplete-output"
     body = request_number.zero? ? incomplete_response("Partial limited answer") :
                                   message_response("Continued limited answer")
@@ -547,7 +573,7 @@ expected_requests = if scenario == "context-error-retry"
                       1
                     elsif scenario == "tool-round-limit"
                       TOOL_ROUND_LIMIT + 2
-                    elsif %w[tool-write tool-edit tool-shell-env tool-bash-denied compaction-resume incomplete-output interrupt-output interrupt-tool].include?(scenario)
+                    elsif %w[tool-write tool-edit tool-shell-env tool-bash-denied tool-timeout compaction-resume incomplete-output interrupt-output interrupt-tool].include?(scenario)
                       2
                     else
                       1

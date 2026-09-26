@@ -22,6 +22,7 @@
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -746,16 +747,16 @@ namespace microcodex {
         return body;
     }
 
-    CodexApi::ToolExecutionResult CodexApi::executeToolCall(const CodexToolCall &call, const std::stop_token stop_token) const {
+    CodexApi::ToolExecutionResult CodexApi::executeToolCall(const std::span<const std::shared_ptr<const ToolBase>> tools, const CodexToolCall &call, const std::stop_token stop_token, const std::size_t maximum_output_bytes) {
         try {
             if (stop_token.stop_requested()) {
                 return {{call.call_id, "Error: Tool execution interrupted"}, {}, false};
             }
 
-            const auto tool = std::find_if(config_.tools.begin(), config_.tools.end(), [&call](const auto &candidate) {
+            const auto tool = std::find_if(tools.begin(), tools.end(), [&call](const auto &candidate) {
                 return candidate != nullptr && candidate->name() == call.name;
             });
-            auto result = tool == config_.tools.end()
+            auto result = tool == tools.end()
                               ? std::expected<ToolResult, std::string>(std::unexpected("Unknown tool '" + call.name + "'"))
                               : (*tool)->executeJson(call.arguments, stop_token);
             if (stop_token.stop_requested()) {
@@ -766,7 +767,7 @@ namespace microcodex {
             }
             return {{call.call_id,
                      boundedToolOutput(std::move(result->output),
-                                       config_.maximum_tool_output_bytes)},
+                                       maximum_output_bytes)},
                     std::move(result->edit),
                     true};
         } catch (const std::exception &error) {
@@ -797,9 +798,22 @@ namespace microcodex {
             }
         }
 
-        std::vector<std::future<ToolExecutionResult>> futures;
-        futures.reserve(calls.size());
+        struct ToolTask {
+            std::future<ToolExecutionResult> future;
+            std::stop_source stop_source;
+            // Anchors the task's timeout deadline: with several stuck tools,
+            // waiting a fresh `timeout` per task would let the turn take up to
+            // N x timeout, so each task waits only until its own deadline.
+            std::chrono::steady_clock::time_point start_time{};
+        };
+        std::vector<ToolTask> tasks;
+        tasks.reserve(calls.size());
         try {
+            // Captured by value: a task that hits the execution timeout keeps
+            // running on a reaper thread after this function returns, so it
+            // must never touch CodexApi state through `this`.
+            const auto tools = config_.tools;
+            const std::size_t maximum_output_bytes = config_.maximum_tool_output_bytes;
             for (const CodexToolCall &call : calls) {
                 emitEvent({
                     .type = CodexEventType::ToolStarted,
@@ -809,9 +823,13 @@ namespace microcodex {
                     .text = call.arguments,
                     .edit = {},
                 });
-                futures.push_back(std::async(std::launch::async, [this, call, stop_token] {
-                    return executeToolCall(call, stop_token);
-                }));
+                ToolTask task;
+                const std::stop_token task_token = task.stop_source.get_token();
+                task.start_time = std::chrono::steady_clock::now();
+                task.future = std::async(std::launch::async, [tools, call, task_token, maximum_output_bytes] {
+                    return executeToolCall(tools, call, task_token, maximum_output_bytes);
+                });
+                tasks.push_back(std::move(task));
             }
         } catch (const std::exception &error) {
             return std::unexpected(std::string("Could not start parallel tool execution: ") + error.what());
@@ -819,19 +837,64 @@ namespace microcodex {
             return std::unexpected("Could not start parallel tool execution");
         }
 
+        // A cancelled turn stops every in-flight tool, including ones already
+        // past their wait below.
+        auto propagate_stop = [&tasks] {
+            for (auto &task : tasks) {
+                task.stop_source.request_stop();
+            }
+        };
+        const std::stop_callback<decltype(propagate_stop)> stop_propagation(stop_token, std::move(propagate_stop));
+
+        const std::chrono::seconds timeout(config_.tool_execution_timeout_seconds);
         std::vector<ToolExecutionResult> results;
         results.reserve(calls.size());
-        for (std::size_t index = 0; index < futures.size(); ++index) {
+        for (std::size_t index = 0; index < tasks.size(); ++index) {
             ToolExecutionResult result;
-            try {
-                // All futures have already been launched. Reading them in this
-                // order preserves the model's call order without serializing
-                // their actual execution.
-                result = futures[index].get();
-            } catch (const std::exception &error) {
-                result = {{calls[index].call_id, std::string("Error: Tool task failed: ") + error.what()}, {}, false};
-            } catch (...) {
-                result = {{calls[index].call_id, "Error: Tool task failed"}, {}, false};
+            // The deadline is anchored at the task's launch, not at the moment
+            // this loop reaches it: otherwise parallel stuck tools would each
+            // consume a full timeout and the turn could take N x timeout.
+            const bool timed_out = timeout.count() > 0 &&
+                                   tasks[index].future.wait_until(tasks[index].start_time + timeout) == std::future_status::timeout;
+            if (timed_out) {
+                // Ask the stuck tool to stop, then report the timeout without
+                // waiting for it: the turn must never wedge behind a hung tool
+                // call.
+                tasks[index].stop_source.request_stop();
+                result = {{calls[index].call_id,
+                           "Error: Tool execution timed out after " + std::to_string(config_.tool_execution_timeout_seconds) + " seconds"},
+                          {},
+                          false};
+                // Give a cooperative tool a brief grace period to observe the
+                // stop and exit (the bash tool kills its child process on
+                // stop). A tool that ignores the stop is left to a detached
+                // reaper thread: futures from std::async block in their
+                // destructor until the task finishes, so a still-running task
+                // must never be destroyed here.
+                if (tasks[index].future.wait_for(std::chrono::seconds(2)) == std::future_status::ready) {
+                    try {
+                        tasks[index].future.get();
+                    } catch (...) {
+                    }
+                } else {
+                    std::thread([future = std::move(tasks[index].future)]() mutable {
+                        try {
+                            future.get();
+                        } catch (...) {
+                        }
+                    }).detach();
+                }
+            } else {
+                try {
+                    // All futures have already been launched. Reading them in this
+                    // order preserves the model's call order without serializing
+                    // their actual execution.
+                    result = tasks[index].future.get();
+                } catch (const std::exception &error) {
+                    result = {{calls[index].call_id, std::string("Error: Tool task failed: ") + error.what()}, {}, false};
+                } catch (...) {
+                    result = {{calls[index].call_id, "Error: Tool task failed"}, {}, false};
+                }
             }
 
             emitEvent({

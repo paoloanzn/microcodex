@@ -35,6 +35,12 @@ namespace microcodex {
         std::size_t maximum_tool_rounds = 128;
         std::size_t maximum_parallel_tool_calls = 32;
         std::size_t maximum_tool_output_bytes = 64 * 1024;
+        // Maximum wall-clock time for a single tool call, measured from when the
+        // call starts, so parallel stuck calls cannot stack their timeouts.
+        // When a call exceeds it, the call is reported as a timeout error and
+        // its worker is asked to stop, so a stuck tool can never wedge the
+        // turn. Zero disables the timeout. Tunable at runtime with MICROCODEX_TOOL_EXECUTION_TIMEOUT_SECONDS.
+        std::size_t tool_execution_timeout_seconds = 120;
         // Offline fallback matching Codex's 272K unknown-model descriptor. The
         // real values are queried from /models before an online run. Keeping an
         // explicit fallback lets CodexApi initialize and load saved conversation
@@ -114,7 +120,10 @@ namespace microcodex {
         std::expected<std::string, std::string> requestSummary(std::span<const std::string> items, std::stop_token stop_token);
         std::expected<void, std::string> compactContext(std::stop_token stop_token, std::size_t &protected_start, bool force);
         std::expected<std::vector<ToolExecutionResult>, std::string> executeToolCalls(std::span<const CodexToolCall> calls, std::stop_token stop_token, std::string_view turn_id) const;
-        ToolExecutionResult executeToolCall(const CodexToolCall &call, std::stop_token stop_token) const;
+        // Runs one tool call without touching CodexApi state. A call that hits
+        // the execution timeout keeps running on a reaper thread after
+        // executeToolCalls returns, so it must never capture `this`.
+        static ToolExecutionResult executeToolCall(std::span<const std::shared_ptr<const ToolBase>> tools, const CodexToolCall &call, std::stop_token stop_token, std::size_t maximum_output_bytes);
         std::expected<std::string, std::string> buildRequestBody(std::span<const std::string> items, std::string_view instructions, bool include_tools, std::string_view final_item = {}) const;
         void emitEvent(CodexEvent event) const noexcept;
 

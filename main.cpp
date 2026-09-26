@@ -271,12 +271,28 @@ namespace {
         return {};
     }
 
+    std::expected<void, std::string> applyToolTimeoutEnvironment(microcodex::CodexApiConfig &config) {
+        auto parsed = applySizeEnvironment("MICROCODEX_TOOL_EXECUTION_TIMEOUT_SECONDS",
+                                           config.tool_execution_timeout_seconds);
+        if (!parsed) return parsed;
+        // Zero disables the timeout. Anything above a year is almost certainly
+        // a mistake, and it would overflow std::chrono::seconds' signed
+        // representation, silently disabling the timeout instead of erroring.
+        constexpr std::size_t one_year_seconds = 365 * 24 * 60 * 60;
+        if (config.tool_execution_timeout_seconds > one_year_seconds) {
+            return std::unexpected("MICROCODEX_TOOL_EXECUTION_TIMEOUT_SECONDS must not exceed 31536000 (one year); use 0 to disable the timeout");
+        }
+        return {};
+    }
+
     std::expected<void, std::string> applyConversationEnvironment(microcodex::CodexApiConfig &config) {
         auto compact_at = applySizeEnvironment("MICROCODEX_COMPACT_AT_TOKENS",
                                                config.compaction.compact_at_tokens);
         if (!compact_at) return compact_at;
-        return applySizeEnvironment("MICROCODEX_RETAINED_CONTEXT_TOKENS",
-                                    config.compaction.retained_context_tokens);
+        auto retained = applySizeEnvironment("MICROCODEX_RETAINED_CONTEXT_TOKENS",
+                                             config.compaction.retained_context_tokens);
+        if (!retained) return retained;
+        return applyToolTimeoutEnvironment(config);
     }
 
     std::expected<void, std::string> applyModelContextLimits(microcodex::CodexApiConfig &config) {
