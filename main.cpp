@@ -22,7 +22,7 @@
 
 namespace {
 
-    constexpr std::string_view default_model = "gpt-5.6-sol";
+    constexpr std::string_view default_model = "gpt-6-sol";
 
     void printUsage(const std::string_view executable) {
         std::cout << "Usage:\n"
