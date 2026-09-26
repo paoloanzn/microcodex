@@ -73,6 +73,8 @@ def validate_scenario!(scenario, request_number, payload)
   case scenario
   when "text"
     validate_coding_tools!(payload)
+    assert(payload.dig("reasoning", "effort") == "medium",
+           "default reasoning effort was not sent as medium")
     assert(payload["model"] == "test-model", "CLI model option was not sent")
     assert(input_text(payload) == "Say hello from two arguments",
            "CLI prompt arguments were not joined and sent")
@@ -87,8 +89,34 @@ def validate_scenario!(scenario, request_number, payload)
            "shared Codex skill path was not added to the prompt")
   when "default-model"
     validate_coding_tools!(payload)
+    assert(payload.dig("reasoning", "effort") == "medium",
+           "default-model request did not send the default effort")
     assert(payload["model"] == "gpt-6-sol", "default GPT-6 model was not sent")
     assert(input_text(payload) == "Say hello with the default model",
+           "CLI prompt arguments were not joined and sent")
+  when "effort"
+    validate_coding_tools!(payload)
+    assert(payload.dig("reasoning", "effort") == "high",
+           "CLI --effort was not sent as reasoning.effort")
+    assert(input_text(payload) == "Say hello with high effort",
+           "CLI prompt arguments were not joined and sent")
+  when "effort-env"
+    validate_coding_tools!(payload)
+    assert(payload.dig("reasoning", "effort") == "low",
+           "MICROCODEX_EFFORT was not sent as reasoning.effort")
+    assert(input_text(payload) == "Say hello with env effort",
+           "CLI prompt arguments were not joined and sent")
+  when "effort-persistent"
+    validate_coding_tools!(payload)
+    assert(payload.dig("reasoning", "effort") == "disabled",
+           "--effort persistent was not normalized to the Responses API 'disabled' value")
+    assert(input_text(payload) == "Say hello with persistent effort",
+           "CLI prompt arguments were not joined and sent")
+  when "effort-ultra"
+    validate_coding_tools!(payload)
+    assert(payload.dig("reasoning", "effort") == "max",
+           "--effort ultra was not resolved to the model wire top 'max'")
+    assert(input_text(payload) == "Say hello with ultra effort",
            "CLI prompt arguments were not joined and sent")
   when "http-error"
     validate_coding_tools!(payload)
@@ -414,6 +442,10 @@ end
 def response_for(scenario, request_number)
   case scenario
   when "text" then [200, "OK", "text/event-stream", text_response]
+  when "effort" then [200, "OK", "text/event-stream", text_response]
+  when "effort-env" then [200, "OK", "text/event-stream", text_response]
+  when "effort-persistent" then [200, "OK", "text/event-stream", text_response]
+  when "effort-ultra" then [200, "OK", "text/event-stream", text_response]
   when "paste" then [200, "OK", "text/event-stream", message_response("Paste received")]
   when "keybindings" then [200, "OK", "text/event-stream", message_response("Keys received")]
   when "http-error"
