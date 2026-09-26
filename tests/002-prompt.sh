@@ -14,7 +14,7 @@ EOF
 
 expect_process "T2.1: prompt arguments and model produce streamed text" 0 \
     run_with_mock text env CODEX_HOME="$prompt_home" PATH="$TEST_BIN_DIR:$PATH" \
-        microcodex --model test-model Say hello from two arguments <<'STDOUT' 3<<'STDERR'
+        microcodex --model test-model --effort high Say hello from two arguments <<'STDOUT' 3<<'STDERR'
 Hello, world!
 STDOUT
 STDERR
