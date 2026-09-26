@@ -7,7 +7,6 @@ MicroCodex is written in C++23 and provides one-shot prompts, an interactive ter
 </p>
 
 ---
-
 ## Quickstart
 
 ### Installing and running MicroCodex
@@ -16,3 +15,106 @@ Run the following on Mac or Linux to install MicroCodex:
 
 ```shell
 curl -fsSL https://github.com/paoloanzn/microcodex/releases/latest/download/install.sh | sh
+```
+
+Then simply run `microcodex login` to sign in, followed by `microcodex` to get started.
+
+<details>
+<summary>You can also go to the <a href="https://github.com/paoloanzn/microcodex/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
+
+Each GitHub Release contains these executables:
+
+- macOS
+  - Apple Silicon/arm64: `microcodex-aarch64-apple-darwin.tar.gz`
+  - x86_64: `microcodex-x86_64-apple-darwin.tar.gz`
+- Linux
+  - x86_64: `microcodex-x86_64-unknown-linux-gnu.tar.gz`
+  - arm64: `microcodex-aarch64-unknown-linux-gnu.tar.gz`
+
+Each archive contains a single entry with the platform baked into the name (for example, `microcodex-aarch64-apple-darwin`), so you likely want to rename it to `microcodex` after extracting it.
+
+</details>
+
+The installer selects the native build for the current architecture. Linux requires the libcurl and OpenSSL runtime libraries.
+
+To install a specific release, set `MICROCODEX_RELEASE`:
+
+```shell
+curl -fsSL https://github.com/paoloanzn/microcodex/releases/latest/download/install.sh | MICROCODEX_RELEASE=v0.1.0 sh
+```
+
+### Using MicroCodex with your ChatGPT plan
+
+Run `microcodex login` and open the displayed URL in your browser. On a remote or headless machine, run `microcodex login --device-auth` and enter the displayed one-time code at the verification URL. MicroCodex stores the resulting OAuth credentials under `$CODEX_HOME`, or `~/.codex` when `CODEX_HOME` is unset.
+
+You can then start an interactive session or pass a one-shot prompt:
+
+```shell
+microcodex
+microcodex "Find the failing test, fix it, and run the relevant test suite"
+```
+
+### Selecting thinking effort
+
+By default MicroCodex asks the model to reason at `medium` effort. You can override this per-invocation with the `--effort` flag, or globally with the `MICROCODEX_EFFORT` environment variable:
+
+```shell
+microcodex --effort high "Refactor the parser and run the test suite"
+microcodex --model gpt-5.6-sol --effort minimal "Summarize this file"
+MICROCODEX_EFFORT=low microcodex "Explain the build system"
+```
+
+Accepted values are `minimal`, `low`, `medium`, and `high`. Invalid values are rejected with a clear error before the request is sent. An explicit `--effort` flag always wins over `MICROCODEX_EFFORT`.
+
+> [!WARNING]
+> MicroCodex is not a sandbox. Before starting the user's shell, it applies a
+> simple lexical denylist that blocks forced file removal (`rm -f`/`rm -rf`),
+> `git reset --hard`, forced `git clean`, `git checkout --`, disk-formatting
+> tools, and shutdown commands. This guard is not a shell parser and is not a
+> complete security boundary: commands that do not match the denylist and all
+> file operations run with the same permissions as the MicroCodex process.
+
+### Using Codex skills
+
+MicroCodex discovers the same filesystem skills installed for Codex under
+`$CODEX_HOME/skills`, or `~/.codex/skills` when `CODEX_HOME` is unset. Each
+skill must have a `SKILL.md` with YAML frontmatter containing a `name` and
+`description`. Skill metadata is added to the agent instructions at session
+startup; the complete skill is read only when its name or description matches
+the task.
+
+### Building from source
+
+Building requires a C++23 compiler, `make`, libcurl development files, and OpenSSL development files on Linux.
+
+```shell
+git clone --recurse-submodules https://github.com/paoloanzn/microcodex.git
+cd microcodex
+make
+```
+
+The executable is written to `build/microcodex`. Run the test suite with `make test`.
+
+## Known bugs and issues
+
+- [View all issues](https://github.com/paoloanzn/microcodex/issues)
+- MCP support is not implemented yet.
+- Text cannot currently be copied from the terminal while using MicroCodex.
+- The bash safety gate is a lexical denylist, not a complete safe-command policy or sandbox; indirect or unrecognized destructive commands may not be blocked.
+
+## Docs
+
+- [**CLI usage**](#using-microcodex-with-your-chatgpt-plan)
+- [**Installing & building**](#installing-and-running-microcodex)
+- [**Tests**](tests/TESTS.md)
+
+This repository is licensed under the [Apache-2.0 License](LICENSE).
+```
+
+### 💾 After you paste it:
+1.  Scroll down.
+2.  Commit message: **`Restore full README and add --effort section`**
+3.  Branch: **`implement-thinking-effort`**
+4.  Click **Commit changes**.
+5.  Go to the PR page and reply to `@paoloanzn`:
+    > @paoloanzn Sorry about that! The README was accidentally truncated during an earlier commit. I've now restored the full file from main and added only the `--effort` section. Thanks for catching it!
