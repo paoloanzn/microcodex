@@ -89,6 +89,10 @@ namespace {
     struct UiState {
         std::deque<UiEntry> transcript;
         std::vector<std::pair<std::string, std::string>> pending_pastes;
+        // Messages typed while a turn is executing. Enter captures the
+        // composer into this queue instead of interrupting the active turn,
+        // and the finished turn drains it in order.
+        std::deque<std::string> message_queue;
         std::string input;
         std::string paste;
         std::string status = "Ready";
@@ -1032,6 +1036,11 @@ namespace {
             appendSpan(line, "   scroll " + std::to_string(state.scroll),
                        muted_foreground | TB_DIM);
         }
+        if (!state.message_queue.empty()) {
+            appendSpan(line, "  ·  " + std::to_string(state.message_queue.size()) +
+                                 " queued",
+                       muted_foreground | TB_DIM);
+        }
         return line;
     }
 
@@ -1174,18 +1183,9 @@ namespace {
         return result;
     }
 
-    void startTurn(UiState &state, microcodex::CodexApi &api, TurnFuture &turn) {
-        if (turn.valid()) {
-            state.status = "A turn is already running";
-            state.dirty = true;
-            return;
-        }
-        if (state.input.empty()) {
-            state.status = "Enter a message first";
-            state.dirty = true;
-            return;
-        }
-
+    // Resolve paste placeholders and take the composed message out of the
+    // composer, leaving it empty and ready for the next input.
+    std::string composeMessage(UiState &state) {
         std::string message = std::move(state.input);
         for (auto &[placeholder, paste] : state.pending_pastes) {
             const std::size_t position = message.find(placeholder);
@@ -1196,6 +1196,11 @@ namespace {
         state.pending_pastes.clear();
         state.input.clear();
         state.input_cursor = 0;
+        return message;
+    }
+
+    void beginTurn(UiState &state, microcodex::CodexApi &api, TurnFuture &turn,
+                   std::string message) {
         state.scroll = 0;
         addEntry(state, {
             .kind = EntryKind::User,
@@ -1225,7 +1230,32 @@ namespace {
         state.dirty = true;
     }
 
-    void collectFinishedTurn(UiState &state, PendingEvents &pending, TurnFuture &turn) {
+    void startTurn(UiState &state, microcodex::CodexApi &api, TurnFuture &turn) {
+        if (turn.valid()) {
+            // The turn keeps running: capture the composer into the queue
+            // instead of dropping the input or interrupting the turn.
+            std::string message = composeMessage(state);
+            if (message.empty()) {
+                state.status = "Enter a message first";
+                state.dirty = true;
+                return;
+            }
+            state.message_queue.push_back(std::move(message));
+            state.status = "Message queued (" +
+                           std::to_string(state.message_queue.size()) + " pending)";
+            state.dirty = true;
+            return;
+        }
+        std::string message = composeMessage(state);
+        if (message.empty()) {
+            state.status = "Enter a message first";
+            state.dirty = true;
+            return;
+        }
+        beginTurn(state, api, turn, std::move(message));
+    }
+
+    void collectFinishedTurn(UiState &state, PendingEvents &pending, microcodex::CodexApi &api, TurnFuture &turn) {
         if (!turn.valid() || turn.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
             return;
         }
@@ -1249,6 +1279,14 @@ namespace {
         } catch (...) {
             addNoticeOnce(state, EntryKind::Error, "Turn task failed");
             state.status = "Turn failed";
+        }
+
+        // The turn is done: send the oldest queued message next, keeping the
+        // FIFO order the user typed them in.
+        if (!state.quitting && !state.message_queue.empty()) {
+            std::string queued = std::move(state.message_queue.front());
+            state.message_queue.pop_front();
+            beginTurn(state, api, turn, std::move(queued));
         }
 
         state.dirty = true;
@@ -1481,9 +1519,11 @@ namespace {
         if (!turn.valid()) {
             return;
         }
+        // Quitting discards queued follow-ups: no new turn may start on the way out.
+        state.message_queue.clear();
         api.interrupt();
         turn.wait();
-        collectFinishedTurn(state, pending, turn);
+        collectFinishedTurn(state, pending, api, turn);
     }
 
 } // namespace
@@ -1524,7 +1564,7 @@ namespace microcodex {
         std::string terminal_error;
         while (!state.quitting) {
             applyPendingEvents(state, pending);
-            collectFinishedTurn(state, pending, turn);
+            collectFinishedTurn(state, pending, api, turn);
 
             if (state.dirty) {
                 const int rendered = render(state, turn.valid());
