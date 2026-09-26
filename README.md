@@ -7,7 +7,6 @@ MicroCodex is written in C++23 and provides one-shot prompts, an interactive ter
 </p>
 
 ---
-
 ## Quickstart
 
 ### Installing and running MicroCodex
@@ -55,6 +54,18 @@ microcodex
 microcodex "Find the failing test, fix it, and run the relevant test suite"
 ```
 
+### Selecting thinking effort
+
+By default MicroCodex asks the model to reason at `medium` effort. You can override this per-invocation with the `--effort` flag, or globally with the `MICROCODEX_EFFORT` environment variable:
+
+```shell
+microcodex --effort high "Refactor the parser and run the test suite"
+microcodex --model gpt-5.6-sol --effort minimal "Summarize this file"
+MICROCODEX_EFFORT=low microcodex "Explain the build system"
+```
+
+Accepted values are `minimal`, `low`, `medium`, and `high`. Invalid values are rejected with a clear error before the request is sent. An explicit `--effort` flag always wins over `MICROCODEX_EFFORT`.
+
 > [!WARNING]
 > MicroCodex is not a sandbox. Before starting the user's shell, it applies a
 > simple lexical denylist that blocks forced file removal (`rm -f`/`rm -rf`),
@@ -98,3 +109,12 @@ The executable is written to `build/microcodex`. Run the test suite with `make t
 - [**Tests**](tests/TESTS.md)
 
 This repository is licensed under the [Apache-2.0 License](LICENSE).
+```
+
+### 💾 After you paste it:
+1.  Scroll down.
+2.  Commit message: **`Restore full README and add --effort section`**
+3.  Branch: **`implement-thinking-effort`**
+4.  Click **Commit changes**.
+5.  Go to the PR page and reply to `@paoloanzn`:
+    > @paoloanzn Sorry about that! The README was accidentally truncated during an earlier commit. I've now restored the full file from main and added only the `--effort` section. Thanks for catching it!
