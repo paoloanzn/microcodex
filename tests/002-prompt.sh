@@ -54,6 +54,13 @@ Hello, world!
 STDOUT
 STDERR
 
+expect_process "T2.10: --effort ultra sends the model wire top 'max'" 0 \
+    run_with_mock effort-ultra env CODEX_HOME="$prompt_home" PATH="$TEST_BIN_DIR:$PATH" \
+        microcodex --effort ultra Say hello with ultra effort <<'STDOUT' 3<<'STDERR'
+Hello, world!
+STDOUT
+STDERR
+
 expect_process "T2.7: an invalid MICROCODEX_EFFORT fails with a clear error" 1 \
     env CODEX_HOME="$prompt_home" MICROCODEX_EFFORT=turbo PATH="$TEST_BIN_DIR:$PATH" \
         microcodex Say hello <<'STDOUT' 3<<'STDERR'

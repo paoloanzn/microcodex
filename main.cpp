@@ -29,7 +29,8 @@ namespace {
     // set (openai/codex codex-rs/protocol/src/openai_models.rs). The value is
     // sent as-is in the request's "reasoning": {"effort": ...} field, except
     // "persistent", which the Responses API calls "disabled" (the official
-    // client keeps "persistent" in local settings and sends "disabled").
+    // client keeps "persistent" in local settings and sends "disabled"), and
+    // "ultra", which maps to the gpt-6-sol wire top "max".
     constexpr std::string_view accepted_effort_values[] = {
         "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "persistent",
     };
@@ -53,6 +54,12 @@ namespace {
         }
         if (effort == "persistent") {
             return "disabled";
+        }
+        // The gpt-6-sol wire set tops out at "max" (docs list
+        // none/low/medium/high/xhigh/max), so the higher "ultra" tier maps
+        // down to it instead of sending an unsupported value.
+        if (effort == "ultra") {
+            return "max";
         }
         for (const std::string_view accepted : accepted_effort_values) {
             if (effort == accepted) return std::string(effort);
@@ -93,7 +100,13 @@ namespace {
         while (argument < argc) {
             const std::string_view flag(argv[argument]);
             if (flag == "--model") {
-                if (++argument == argc || std::string_view(argv[argument]).empty()) {
+                if (++argument == argc) {
+                    return std::unexpected("--model requires a model name");
+                }
+                const std::string_view value(argv[argument]);
+                // An option-looking token is not a model name; --model is
+                // still missing its value.
+                if (value.empty() || value.starts_with("--")) {
                     return std::unexpected("--model requires a model name");
                 }
                 model = argv[argument++];

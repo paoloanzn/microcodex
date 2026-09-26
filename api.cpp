@@ -35,6 +35,14 @@ namespace {
 
     constexpr std::string_view interrupted_message = "Codex turn was interrupted";
     constexpr std::string_view incomplete_response_prefix = "The Codex response was incomplete: ";
+
+    // Wire value for the reasoning effort. The Responses API expects
+    // "disabled" where local settings keep "persistent", so normalize here at
+    // the request boundary and every caller of CodexApiConfig gets the wire
+    // value without having to know about the mapping.
+    std::string_view wireReasoningEffort(const std::string_view effort) {
+        return effort == "persistent" ? "disabled" : effort;
+    }
     constexpr std::string_view turn_usage_limit_error =
         "The Codex response was incomplete: max_output_tokens";
     constexpr std::string_view tool_round_limit_error =
@@ -731,7 +739,7 @@ namespace microcodex {
             body += ",\"tool_choice\":\"auto\",\"parallel_tool_calls\":true";
         }
         body += ",\"reasoning\":{\"effort\":";
-        appendJsonString(body, config_.reasoning_effort);
+        appendJsonString(body, wireReasoningEffort(config_.reasoning_effort));
         body += "},\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"prompt_cache_key\":";
         appendJsonString(body, session_id_);
         body += ",\"client_metadata\":{\"x-codex-installation-id\":";

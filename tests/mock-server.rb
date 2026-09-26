@@ -112,6 +112,12 @@ def validate_scenario!(scenario, request_number, payload)
            "--effort persistent was not normalized to the Responses API 'disabled' value")
     assert(input_text(payload) == "Say hello with persistent effort",
            "CLI prompt arguments were not joined and sent")
+  when "effort-ultra"
+    validate_coding_tools!(payload)
+    assert(payload.dig("reasoning", "effort") == "max",
+           "--effort ultra was not resolved to the model wire top 'max'")
+    assert(input_text(payload) == "Say hello with ultra effort",
+           "CLI prompt arguments were not joined and sent")
   when "http-error"
     validate_coding_tools!(payload)
   when "remote-503"
@@ -439,6 +445,7 @@ def response_for(scenario, request_number)
   when "effort" then [200, "OK", "text/event-stream", text_response]
   when "effort-env" then [200, "OK", "text/event-stream", text_response]
   when "effort-persistent" then [200, "OK", "text/event-stream", text_response]
+  when "effort-ultra" then [200, "OK", "text/event-stream", text_response]
   when "paste" then [200, "OK", "text/event-stream", message_response("Paste received")]
   when "keybindings" then [200, "OK", "text/event-stream", message_response("Keys received")]
   when "http-error"

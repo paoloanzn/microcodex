@@ -37,6 +37,23 @@ STDOUT
 --model requires a model name
 STDERR
 
+expect_process "T1.9: --model rejects an option-looking value" 1 \
+    env PATH="$TEST_BIN_DIR:$PATH" microcodex --model --effort high hello <<'STDOUT' 3<<'STDERR'
+Usage:
+  microcodex login [--device-auth]
+  microcodex logout
+  microcodex list
+  microcodex show ID
+  microcodex [--model MODEL] [--effort EFFORT] resume ID [PROMPT]
+  microcodex [--model MODEL] [--effort EFFORT]
+  microcodex [--model MODEL] [--effort EFFORT] PROMPT
+
+Effort values: none, minimal, low, medium, high, xhigh, max, ultra, persistent (default: medium)
+  MICROCODEX_EFFORT selects the effort when --effort is absent.
+STDOUT
+--model requires a model name
+STDERR
+
 expect_process "T1.3: a prompt requires login" 1 \
     env CODEX_HOME="$empty_home" PATH="$TEST_BIN_DIR:$PATH" microcodex hello <<'STDOUT' 3<<'STDERR'
 STDOUT
