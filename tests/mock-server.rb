@@ -37,7 +37,7 @@ def read_request(socket)
 end
 
 def validate_models_request!(request_line, headers)
-  assert(request_line == "GET /models?client_version=0.146.0 HTTP/1.1",
+  assert(request_line == "GET /models?client_version=0.155.0 HTTP/1.1",
          "request did not GET the models endpoint")
   assert(headers["authorization"] == "Bearer test-access-token",
          "models request did not send the isolated access token")
@@ -85,6 +85,11 @@ def validate_scenario!(scenario, request_number, payload)
            "shared Codex skill metadata was not added to the prompt")
     assert(instructions.include?("/skills/test-skill/SKILL.md"),
            "shared Codex skill path was not added to the prompt")
+  when "default-model"
+    validate_coding_tools!(payload)
+    assert(payload["model"] == "gpt-6-sol", "default GPT-6 model was not sent")
+    assert(input_text(payload) == "Say hello with the default model",
+           "CLI prompt arguments were not joined and sent")
   when "http-error"
     validate_coding_tools!(payload)
   when "remote-503"
@@ -468,6 +473,8 @@ def response_for(scenario, request_number)
     text = request_number.zero? ? "The seed established compactable state." :
                                   "Continued from compacted state"
     [200, "OK", "text/event-stream", message_response(text)]
+  when "default-model"
+    [200, "OK", "text/event-stream", message_response("Hello from the default model!")]
   when "context-error-retry"
     case request_number
     when 0
@@ -484,6 +491,27 @@ end
 def models_response(scenario)
   test_model_context_window = scenario == "compaction-resume" ? 2 : 272_000
   JSON.generate(models: [
+    {
+      slug: "gpt-6-sol",
+      context_window: 400_000,
+      max_context_window: 400_000,
+      effective_context_window_percent: 95,
+      auto_compact_token_limit: nil
+    },
+    {
+      slug: "gpt-6-astra",
+      context_window: 400_000,
+      max_context_window: 400_000,
+      effective_context_window_percent: 95,
+      auto_compact_token_limit: nil
+    },
+    {
+      slug: "gpt-6-luna",
+      context_window: 400_000,
+      max_context_window: 400_000,
+      effective_context_window_percent: 95,
+      auto_compact_token_limit: nil
+    },
     {
       slug: "gpt-5.6-sol",
       context_window: 272_000,

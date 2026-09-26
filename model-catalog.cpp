@@ -21,7 +21,10 @@ namespace microcodex {
         constexpr std::size_t maximum_models_response_bytes = 2 * 1024 * 1024;
         // The backend filters models by their minimum Codex client version.
         // Keep this aligned with the Codex protocol version we implement.
-        constexpr std::string_view models_client_version = "0.146.0";
+        // GPT-6 models (gpt-6-sol, gpt-6-luna) require client version 0.155.0;
+        // gpt-6-astra requires 0.153.0. Verified against openai/codex's
+        // bundled model catalog (minimal_client_version fields).
+        constexpr std::string_view models_client_version = "0.155.0";
 
         std::expected<std::optional<std::size_t>, std::string> optionalSizeMember(const std::string_view object, const std::string_view name) {
             auto member = json::findJsonMember(object, name);
