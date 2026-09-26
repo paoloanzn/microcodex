@@ -1244,6 +1244,98 @@ namespace microcodex {
         return loadOAuthCredentials(path.value());
     }
 
+    std::expected<OAuthCredentials, std::string> apiKeyCredentials(std::string api_key) {
+        if (containsNewline(api_key)) {
+            return std::unexpected("API key cannot contain a newline");
+        }
+        OAuthCredentials credentials;
+        credentials.access_token = std::move(api_key);
+        credentials.api_key_mode = true;
+        return credentials;
+    }
+
+    std::expected<std::optional<OAuthCredentials>, std::string> resolveCredentials() {
+        if (const char *environment_key = std::getenv("OPENAI_API_KEY");
+            environment_key != nullptr && environment_key[0] != '\0') {
+            auto credentials = apiKeyCredentials(environment_key);
+            if (!credentials) {
+                return std::unexpected(credentials.error());
+            }
+            return std::optional<OAuthCredentials>{std::move(*credentials)};
+        }
+
+        auto path = defaultOAuthCredentialsPath();
+        if (!path) {
+            return std::unexpected(path.error());
+        }
+        auto contents = readSmallFile(*path);
+        if (!contents) {
+            return std::unexpected(contents.error());
+        }
+        if (!contents->has_value()) {
+            return std::optional<OAuthCredentials>{};
+        }
+
+        // A Codex auth.json may carry an API key next to (or instead of) the
+        // OAuth token set. It ranks below the environment variable above.
+        auto file_key = json::jsonStringMember(contents->value(), "OPENAI_API_KEY");
+        if (!file_key) {
+            return std::unexpected("Could not parse credentials: " + file_key.error());
+        }
+        if (file_key->has_value() && !file_key->value().empty()) {
+            auto credentials = apiKeyCredentials(std::move(file_key->value()));
+            if (!credentials) {
+                return std::unexpected(credentials.error());
+            }
+            return std::optional<OAuthCredentials>{std::move(*credentials)};
+        }
+
+        return loadOAuthCredentials(*path);
+    }
+
+    std::expected<long long, std::string> jwtExpirySeconds(const std::string_view payload) {
+        auto member = json::findJsonMember(payload, "exp");
+        if (!member) {
+            return std::unexpected(member.error());
+        }
+        if (!member->has_value()) {
+            return std::unexpected("JWT has no expiry claim");
+        }
+        long long seconds = 0;
+        const std::string_view text = member->value();
+        const auto [end, error] =
+            std::from_chars(text.data(), text.data() + text.size(), seconds);
+        if (error != std::errc{} || end != text.data() + text.size() || seconds < 0) {
+            return std::unexpected("JWT expiry claim is not an integer");
+        }
+        return seconds;
+    }
+
+    std::expected<bool, std::string> oauthAccessTokenExpired(const OAuthCredentials &credentials, const std::chrono::seconds refresh_skew) {
+        const std::string_view token = credentials.access_token;
+        const std::size_t first_dot = token.find('.');
+        const std::size_t second_dot = first_dot == std::string_view::npos
+                                           ? std::string_view::npos
+                                           : token.find('.', first_dot + 1);
+        if (first_dot == std::string_view::npos || second_dot == std::string_view::npos ||
+            token.find('.', second_dot + 1) != std::string_view::npos) {
+            // Opaque tokens carry no decodable expiry; rely on 401 handling.
+            return false;
+        }
+        auto payload =
+            base64UrlDecode(token.substr(first_dot + 1, second_dot - first_dot - 1));
+        if (!payload) {
+            return false;
+        }
+        auto expiry = jwtExpirySeconds(*payload);
+        if (!expiry) {
+            return false;
+        }
+        const auto expiry_time =
+            std::chrono::system_clock::time_point(std::chrono::seconds(*expiry));
+        return expiry_time <= std::chrono::system_clock::now() + refresh_skew;
+    }
+
     std::expected<void, std::string> saveOAuthCredentials(const OAuthCredentials &credentials, const std::filesystem::path &path) {
         auto validation = validateCredentials(credentials);
         if (!validation) {
@@ -1331,6 +1423,26 @@ namespace microcodex {
             refreshed.refresh_token = std::move(refresh_token.value().value());
         }
         return refreshed;
+    }
+
+    std::expected<OAuthCredentials, std::string> ensureFreshCredentials(const OAuthCredentials &credentials, OAuthOptions options) {
+        if (credentials.api_key_mode || credentials.refresh_token.empty()) {
+            return credentials;
+        }
+        auto expired = oauthAccessTokenExpired(credentials);
+        if (!expired || !*expired) {
+            // Unparseable tokens fall back to 401-driven refresh per request.
+            return credentials;
+        }
+        auto refreshed = refreshOAuthCredentials(credentials, std::move(options));
+        if (!refreshed) {
+            return std::unexpected(refreshed.error());
+        }
+        auto saved = saveOAuthCredentials(*refreshed);
+        if (!saved) {
+            return std::unexpected(saved.error());
+        }
+        return std::move(*refreshed);
     }
 
     // unlink() removes only a file or symlink; unlike filesystem::remove it will

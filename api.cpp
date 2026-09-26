@@ -946,81 +946,141 @@ namespace microcodex {
         return std::move(sampled->response);
     }
 
-    std::expected<CodexApi::ModelResponse, std::string> CodexApi::performRequest(std::string request_body, const std::stop_token stop_token, const std::string_view turn_id, const bool emit_events, ModelResponse *partial_response) const {
-        std::vector<std::string> headers{
-            "Authorization: Bearer " + config_.access_token,
-            "Content-Type: application/json",
-            "Accept: text/event-stream",
-            "originator: codex_cli_rs",
-            "session-id: " + session_id_,
-            "thread-id: " + session_id_,
-            "x-client-request-id: " + session_id_,
-            "x-codex-window-id: " + session_id_ + ":" + std::to_string(turn_number_ - 1),
-        };
-        if (!config_.account_id.empty()) headers.push_back("ChatGPT-Account-ID: " + config_.account_id);
-        if (emit_events && !turn_state_.empty()) headers.push_back("x-codex-turn-state: " + turn_state_);
-
-        StreamState state;
-        state.turn_id = std::string(turn_id);
-        state.events = emit_events ? events_ : nullptr;
-        auto response = performHttpRequest({
-            .method = HttpMethod::Post,
-            .url = config_.endpoint,
-            .headers = headers,
-            .body = request_body,
-            .idle_timeout_seconds = config_.idle_timeout_seconds,
-            .total_timeout_seconds = 0,
-            .maximum_response_bytes = 64 * 1024,
-            .stop_token = stop_token,
-        }, receiveResponseBody, receiveResponseHeader, &state);
-        if (!response) {
-            const bool interrupted = stop_token.stop_requested();
-            const bool usage_limited = isTurnUsageLimitError(response.error());
-            const bool transport_failed = isTransportFailureError(response.error());
-            if ((interrupted || usage_limited || transport_failed) && partial_response != nullptr) {
-                // Cancellation, response limits, and transport failures are
-                // resumable: preserve all complete items and streamed text
-                // received before termination.
-                *partial_response = ModelResponse{
-                    .response = std::move(state.response),
-                    .output_items = std::move(state.output_items),
-                    .turn_state = std::move(state.turn_state),
-                };
-            }
-            if (interrupted) {
-                return std::unexpected(std::string(interrupted_message));
-            }
-            return std::unexpected(response.error());
-        }
-        if (response->status < 200 || response->status >= 300) {
-            if (isServerErrorStatus(response->status) && partial_response != nullptr) {
-                // Remote 5xx failures are resumable like interruptions: keep
-                // whatever the model produced before the failure so the next
-                // turn can continue from it.
-                *partial_response = ModelResponse{
-                    .response = std::move(state.response),
-                    .output_items = std::move(state.output_items),
-                    .turn_state = std::move(state.turn_state),
-                };
-            }
-            return std::unexpected(responseErrorMessage(response->body, response->status));
-        }
-
-        auto final_event = finishSse(state);
-        if (!final_event) {
-            return std::unexpected(final_event.error());
-        }
-        if (!state.completed) {
-            return std::unexpected("Codex stream closed before response.completed");
-        }
-
-        return ModelResponse{
-            .response = std::move(state.response),
-            .output_items = std::move(state.output_items),
-            .turn_state = std::move(state.turn_state),
-        };
+    bool CodexApi::canRefreshAccessToken() const {
+        return config_.oauth_credentials.has_value() &&
+               !config_.oauth_credentials->api_key_mode &&
+               !config_.oauth_credentials->refresh_token.empty();
     }
 
+    std::expected<void, std::string> CodexApi::refreshAccessToken() {
+        if (!canRefreshAccessToken()) {
+            return std::unexpected("No OAuth refresh token is available");
+        }
+        auto refreshed =
+            refreshOAuthCredentials(*config_.oauth_credentials, config_.oauth_options);
+        if (!refreshed) {
+            return std::unexpected(refreshed.error());
+        }
+        auto saved = saveOAuthCredentials(*refreshed);
+        if (!saved) {
+            return std::unexpected(saved.error());
+        }
+        config_.access_token = refreshed->access_token;
+        config_.account_id = refreshed->account_id;
+        config_.oauth_credentials = std::move(*refreshed);
+        return {};
+    }
+
+    std::expected<void, std::string> CodexApi::refreshAccessTokenIfExpired() {
+        if (!canRefreshAccessToken()) {
+            return {};
+        }
+        auto expired = oauthAccessTokenExpired(*config_.oauth_credentials);
+        // Unparseable tokens cannot be checked proactively; they fall back to
+        // the 401-driven refresh below.
+        if (!expired || !*expired) {
+            return {};
+        }
+        return refreshAccessToken();
+    }
+
+    std::expected<CodexApi::ModelResponse, std::string> CodexApi::performRequest(std::string request_body, const std::stop_token stop_token, const std::string_view turn_id, const bool emit_events, ModelResponse *partial_response) {
+        // Refresh before sending when the stored token is already past its
+        // expiry, so a long-lived session does not waste a round trip. A
+        // failed proactive refresh is not fatal: the stored token may still
+        // be accepted (clock skew between the JWT check and the server), and
+        // a genuinely expired token is caught by the 401-driven refresh
+        // below. This mirrors the warn-and-proceed behavior at startup in
+        // main().
+        static_cast<void>(refreshAccessTokenIfExpired());
+
+        for (int attempt = 0;; ++attempt) {
+            std::vector<std::string> headers{
+                "Authorization: Bearer " + config_.access_token,
+                "Content-Type: application/json",
+                "Accept: text/event-stream",
+                "originator: codex_cli_rs",
+                "session-id: " + session_id_,
+                "thread-id: " + session_id_,
+                "x-client-request-id: " + session_id_,
+                "x-codex-window-id: " + session_id_ + ":" + std::to_string(turn_number_ - 1),
+            };
+            if (!config_.account_id.empty()) headers.push_back("ChatGPT-Account-ID: " + config_.account_id);
+            if (emit_events && !turn_state_.empty()) headers.push_back("x-codex-turn-state: " + turn_state_);
+
+            StreamState state;
+            state.turn_id = std::string(turn_id);
+            state.events = emit_events ? events_ : nullptr;
+            auto response = performHttpRequest({
+                .method = HttpMethod::Post,
+                .url = config_.endpoint,
+                .headers = headers,
+                .body = request_body,
+                .idle_timeout_seconds = config_.idle_timeout_seconds,
+                .total_timeout_seconds = 0,
+                .maximum_response_bytes = 64 * 1024,
+                .stop_token = stop_token,
+            }, receiveResponseBody, receiveResponseHeader, &state);
+            if (!response) {
+                const bool interrupted = stop_token.stop_requested();
+                const bool usage_limited = isTurnUsageLimitError(response.error());
+                const bool transport_failed = isTransportFailureError(response.error());
+                if ((interrupted || usage_limited || transport_failed) && partial_response != nullptr) {
+                    // Cancellation, response limits, and transport failures are
+                    // resumable: preserve all complete items and streamed text
+                    // received before termination.
+                    *partial_response = ModelResponse{
+                        .response = std::move(state.response),
+                        .output_items = std::move(state.output_items),
+                        .turn_state = std::move(state.turn_state),
+                    };
+                }
+                if (interrupted) {
+                    return std::unexpected(std::string(interrupted_message));
+                }
+                return std::unexpected(response.error());
+            }
+
+            // An expired token is refreshed once and the request retried with
+            // the new token. Anything else, including a second 401, surfaces
+            // as an error so a revoked credential cannot loop.
+            if (response->status == 401 && attempt == 0 && canRefreshAccessToken()) {
+                auto refreshed = refreshAccessToken();
+                if (!refreshed) {
+                    return std::unexpected(responseErrorMessage(response->body, response->status) +
+                                           "; token refresh failed: " + refreshed.error());
+                }
+                continue;
+            }
+            if (response->status < 200 || response->status >= 300) {
+                if (isServerErrorStatus(response->status) && partial_response != nullptr) {
+                    // Remote 5xx failures are resumable like interruptions: keep
+                    // whatever the model produced before the failure so the next
+                    // turn can continue from it.
+                    *partial_response = ModelResponse{
+                        .response = std::move(state.response),
+                        .output_items = std::move(state.output_items),
+                        .turn_state = std::move(state.turn_state),
+                    };
+                }
+                return std::unexpected(responseErrorMessage(response->body, response->status));
+            }
+
+            auto final_event = finishSse(state);
+            if (!final_event) {
+                return std::unexpected(final_event.error());
+            }
+            if (!state.completed) {
+                return std::unexpected("Codex stream closed before response.completed");
+            }
+
+            return ModelResponse{
+                .response = std::move(state.response),
+                .output_items = std::move(state.output_items),
+                .turn_state = std::move(state.turn_state),
+            };
+        }
+    }
     std::expected<std::string, std::string> CodexApi::requestSummary(const std::span<const std::string> items, const std::stop_token stop_token) {
         const std::string prompt = userMessageItem("Produce the conversation summary now.");
         auto body = buildRequestBody(items, compactor_.summaryInstructions(), false, prompt);

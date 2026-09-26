@@ -172,7 +172,10 @@ run_with_mock() {
     done
 
     endpoint=http://127.0.0.1:$(sed -n '1p' "$port_file")/responses
-    MICROCODEX_API_ENDPOINT=$endpoint "$@"
+    # The CLI reads MICROCODEX_OAUTH_ISSUER for token refreshes, so the
+    # loopback fixture can also stand in for the OAuth token endpoint.
+    issuer=http://127.0.0.1:$(sed -n '1p' "$port_file")
+    MICROCODEX_API_ENDPOINT=$endpoint MICROCODEX_OAUTH_ISSUER=$issuer "$@"
     app_status=$?
     wait "$active_mock_pid"
     server_status=$?

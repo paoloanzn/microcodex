@@ -346,7 +346,7 @@ int main(const int argc, char *argv[]) {
         }
         resume_path = std::move(*path);
     }
-    auto credentials = microcodex::loadOAuthCredentials();
+    auto credentials = microcodex::resolveCredentials();
     if (!credentials) {
         std::cerr << "Could not load saved credentials: " << credentials.error() << '\n';
         return 1;
@@ -356,9 +356,29 @@ int main(const int argc, char *argv[]) {
         return 1;
     }
 
+    // Keep transport selection at the executable boundary so black-box tests
+    // can exercise the real CLI against a deterministic loopback server. The
+    // default remains the production OAuth issuer.
+    microcodex::OAuthOptions oauth_options;
+    if (const char *issuer = std::getenv("MICROCODEX_OAUTH_ISSUER");
+        issuer != nullptr && issuer[0] != '\0') {
+        oauth_options.issuer = issuer;
+    }
+
+    // Refresh a stored token that is already past its expiry so the model
+    // catalog fetch below and the first turn both run on a valid token.
+    auto fresh = microcodex::ensureFreshCredentials(**credentials, oauth_options);
+    if (!fresh) {
+        std::cerr << "Warning: " << fresh.error() << '\n';
+    } else {
+        **credentials = std::move(*fresh);
+    }
+
     auto config = microcodex::makeCodingAgentConfig(std::move(request->model));
     config.resume_conversation = std::move(resume_path);
     microcodex::applyOAuthCredentials(config, **credentials);
+    config.oauth_credentials = **credentials;
+    config.oauth_options = std::move(oauth_options);
     // Keep transport selection at the executable boundary so black-box tests
     // can exercise the real CLI against a deterministic loopback server. The
     // default remains the production Codex endpoint.

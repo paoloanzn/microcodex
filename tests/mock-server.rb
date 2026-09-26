@@ -36,27 +36,74 @@ def read_request(socket)
   [request_line, header_map, body, payload]
 end
 
-def validate_models_request!(request_line, headers)
+def validate_models_request!(request_line, headers, bearer, account_id)
   assert(request_line == "GET /models?client_version=0.155.0 HTTP/1.1",
          "request did not GET the models endpoint")
-  assert(headers["authorization"] == "Bearer test-access-token",
-         "models request did not send the isolated access token")
-  assert(headers["chatgpt-account-id"] == "test-account",
-         "models request did not send the account ID")
+  assert(headers["authorization"] == "Bearer #{bearer}",
+         "models request did not send the expected bearer token")
+  if account_id.nil?
+    assert(!headers.key?("chatgpt-account-id"),
+           "models request unexpectedly sent an account ID")
+  else
+    assert(headers["chatgpt-account-id"] == account_id,
+           "models request did not send the account ID")
+  end
   assert(headers["accept"] == "application/json",
          "models request did not ask for JSON")
 end
 
-def validate_common!(request_line, headers, payload)
+def validate_common!(request_line, headers, payload, bearer, account_id)
   assert(request_line == "POST /responses HTTP/1.1", "request did not POST /responses")
-  assert(headers["authorization"] == "Bearer test-access-token",
-         "request did not send the isolated access token")
-  assert(headers["chatgpt-account-id"] == "test-account",
-         "request did not send the account ID")
+  assert(headers["authorization"] == "Bearer #{bearer}",
+         "request did not send the expected bearer token")
+  if account_id.nil?
+    assert(!headers.key?("chatgpt-account-id"),
+           "request unexpectedly sent an account ID")
+  else
+    assert(headers["chatgpt-account-id"] == account_id,
+           "request did not send the account ID")
+  end
   assert(headers["accept"] == "text/event-stream",
          "request did not ask for an event stream")
   assert(payload["stream"] == true, "request did not enable streaming")
 
+end
+
+# Unsigned JWT with payload {"exp":1000000000} (2001-09-09): always past its
+# expiry. Must match the expired_jwt in tests/009-auth-refresh.sh.
+EXPIRED_JWT = "eyJhbGciOiJub25lIn0.eyJleHAiOjEwMDAwMDAwMDB9.c2ln"
+
+# Bearer token expected on POST /responses, by scenario and request index.
+def responses_bearer(scenario, request_number)
+  case scenario
+  when "token-refresh-401"
+    request_number.zero? ? "test-access-token" : "refreshed-access-token"
+  when "token-refresh-expired"
+    "refreshed-access-token"
+  when "token-refresh-fallback"
+    EXPIRED_JWT
+  when "api-key"
+    ENV.fetch("MICROCODEX_TEST_BEARER", "test-access-token")
+  else
+    "test-access-token"
+  end
+end
+
+def models_bearer(scenario)
+  case scenario
+  when "token-refresh-expired"
+    "refreshed-access-token"
+  when "token-refresh-fallback"
+    EXPIRED_JWT
+  when "api-key"
+    ENV.fetch("MICROCODEX_TEST_BEARER", "test-access-token")
+  else
+    "test-access-token"
+  end
+end
+
+def expected_account_id(scenario)
+  scenario == "api-key" ? nil : "test-account"
 end
 
 def validate_coding_tools!(payload)
@@ -101,6 +148,14 @@ def validate_scenario!(scenario, request_number, payload)
            "resumed request did not include the aborted turn marker")
   when "stream-error", "stream-drop"
     validate_coding_tools!(payload)
+  when "token-refresh-401", "token-refresh-expired", "token-refresh-fallback"
+    validate_coding_tools!(payload)
+    assert(input_text(payload) == (scenario == "token-refresh-fallback" ? "Fallback after failed refresh" : "Refresh the token"),
+           "token refresh scenario did not receive its prompt")
+  when "api-key"
+    validate_coding_tools!(payload)
+    assert(input_text(payload) == "Api key prompt",
+           "api-key scenario did not receive its prompt")
   when "paste"
     validate_coding_tools!(payload)
     expected = "before\n#{"x" * 1001}\nafter"
@@ -436,6 +491,15 @@ def response_for(scenario, request_number)
     # turn aborted, and return control without retrying.
     [200, "OK", "text/event-stream",
      message_response("unreachable")]
+  when "token-refresh-401"
+    if request_number.zero?
+      [401, "Unauthorized", "application/json",
+       JSON.generate(error: {message: "token expired"})]
+    else
+      [200, "OK", "text/event-stream", text_response]
+    end
+  when "token-refresh-expired", "token-refresh-fallback", "api-key"
+    [200, "OK", "text/event-stream", text_response]
   when "tool-write"
     [200, "OK", "text/event-stream",
      request_number.zero? ? tool_call_response : tool_final_response]
@@ -547,6 +611,8 @@ expected_requests = if scenario == "context-error-retry"
                       1
                     elsif scenario == "tool-round-limit"
                       TOOL_ROUND_LIMIT + 2
+                    elsif %w[token-refresh-401].include?(scenario)
+                      2
                     elsif %w[tool-write tool-edit tool-shell-env tool-bash-denied compaction-resume incomplete-output interrupt-output interrupt-tool].include?(scenario)
                       2
                     else
@@ -564,9 +630,30 @@ while request_number < expected_requests
       socket = server.accept
       request_line, headers, body, payload = read_request(socket)
       FileUtils.mkdir_p(request_directory)
+      if request_line.start_with?("POST /oauth/token")
+        assert(%w[token-refresh-401 token-refresh-expired token-refresh-fallback].include?(scenario),
+               "unexpected OAuth token request in scenario #{scenario.inspect}")
+        assert(payload["grant_type"] == "refresh_token",
+               "refresh did not use the refresh_token grant")
+        assert(payload["refresh_token"] == "test-refresh-token",
+               "refresh did not send the stored refresh token")
+        assert(payload["client_id"] && !payload["client_id"].empty?,
+               "refresh omitted the client ID")
+        if scenario == "token-refresh-fallback"
+          # The refresh endpoint is down: the CLI must proceed with the
+          # stored token instead of failing the turn.
+          send_response(socket, 400, "Bad Request", "application/json",
+                        JSON.generate(error: "refresh_failed"))
+          next
+        end
+        send_response(socket, 200, "OK", "application/json",
+                      JSON.generate(access_token: "refreshed-access-token"))
+        next
+      end
       if request_line.start_with?("GET ")
         assert(!models_requested, "models endpoint was queried more than once")
-        validate_models_request!(request_line, headers)
+        validate_models_request!(request_line, headers, models_bearer(scenario),
+                                 expected_account_id(scenario))
         models_requested = true
         File.binwrite(File.join(request_directory, "models-request.txt"),
                       "#{request_line}\r\n#{headers.inspect}\r\n\r\n")
@@ -576,7 +663,9 @@ while request_number < expected_requests
 
       File.binwrite(File.join(request_directory, "request-#{request_number + 1}.txt"),
                     "#{request_line}\r\n#{headers.inspect}\r\n\r\n#{body}")
-      validate_common!(request_line, headers, payload)
+      validate_common!(request_line, headers, payload,
+                       responses_bearer(scenario, request_number),
+                       expected_account_id(scenario))
       validate_scenario!(scenario, request_number, payload)
       if scenario == "interrupt-output" && request_number.zero?
         socket.write(

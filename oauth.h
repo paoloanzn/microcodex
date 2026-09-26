@@ -24,6 +24,9 @@ namespace microcodex {
         std::string account_id;
         std::string id_token;
         std::string refresh_token;
+        // True when the access token is an OpenAI API key rather than an
+        // OAuth token. API keys have no refresh token and are never refreshed.
+        bool api_key_mode = false;
     };
 
     struct OAuthOptions {
@@ -93,6 +96,30 @@ namespace microcodex {
     // A missing file is a normal logged-out state and returns an empty optional.
     std::expected<std::optional<OAuthCredentials>, std::string> loadOAuthCredentials(const std::filesystem::path &path);
     std::expected<std::optional<OAuthCredentials>, std::string> loadOAuthCredentials();
+
+    // Resolves credentials from the standard Codex/OpenAI defaults, highest
+    // priority first:
+    //   1. the OPENAI_API_KEY environment variable (API-key mode),
+    //   2. the OPENAI_API_KEY member of the default auth.json (API-key mode),
+    //   3. the OAuth token set in the default auth.json.
+    // A missing auth.json is a normal logged-out state and returns an empty
+    // optional, matching loadOAuthCredentials().
+    std::expected<std::optional<OAuthCredentials>, std::string> resolveCredentials();
+
+    // Decodes the JWT expiry ("exp" claim) of an OAuth access token. Returns
+    // false for tokens that are not JWTs or carry no expiry, so callers fall
+    // back to 401-driven refresh for those. The skew refreshes slightly early
+    // to avoid racing the token's expiry mid-request.
+    std::expected<bool, std::string> oauthAccessTokenExpired(
+        const OAuthCredentials &credentials,
+        std::chrono::seconds refresh_skew = std::chrono::seconds(60));
+
+    // Refreshes credentials whose access token is past its JWT expiry and
+    // saves the result back to the default credential path. Credentials that
+    // are not expired, or that have no refresh token (API-key mode), are
+    // returned unchanged.
+    std::expected<OAuthCredentials, std::string> ensureFreshCredentials(
+        const OAuthCredentials &credentials, OAuthOptions options = {});
 
     // Saves the Codex-compatible auth.json atomically with owner-only permissions.
     std::expected<void, std::string> saveOAuthCredentials(const OAuthCredentials &credentials, const std::filesystem::path &path);
