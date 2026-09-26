@@ -72,6 +72,14 @@ skill must have a `SKILL.md` with YAML frontmatter containing a `name` and
 startup; the complete skill is read only when its name or description matches
 the task.
 
+During a coding turn, the agent also has a `sub_agent` tool. It accepts a
+`prompt` and a required `timeout_ms`, runs a separate coding agent with the
+same authentication and model configuration, and returns the child response.
+The child cannot recursively spawn another sub-agent. Timeout and child
+execution errors are returned as tool errors so the parent can recover.
+A timed-out child is asked to stop; a tool that ignores cancellation may keep
+running in the background.
+
 ### Building from source
 
 Building requires a C++23 compiler, `make`, libcurl development files, and OpenSSL development files on Linux.

@@ -46,6 +46,7 @@ namespace microcodex {
             .maximum_summary_bytes = 32 * 1024,
         };
         bool persist_conversation = true;
+        bool enable_sub_agent_tool = true;
         std::optional<std::filesystem::path> resume_conversation;
         std::vector<std::shared_ptr<const ToolBase>> tools;
     };
@@ -115,6 +116,7 @@ namespace microcodex {
         std::expected<void, std::string> compactContext(std::stop_token stop_token, std::size_t &protected_start, bool force);
         std::expected<std::vector<ToolExecutionResult>, std::string> executeToolCalls(std::span<const CodexToolCall> calls, std::stop_token stop_token, std::string_view turn_id) const;
         ToolExecutionResult executeToolCall(const CodexToolCall &call, std::stop_token stop_token) const;
+        std::expected<ToolResult, std::string> runSubAgent(std::string prompt, std::size_t timeout_ms, std::stop_token stop_token) const;
         std::expected<std::string, std::string> buildRequestBody(std::span<const std::string> items, std::string_view instructions, bool include_tools, std::string_view final_item = {}) const;
         void emitEvent(CodexEvent event) const noexcept;
 

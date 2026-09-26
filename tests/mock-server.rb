@@ -65,6 +65,17 @@ def validate_coding_tools!(payload)
          "request did not advertise the coding tools")
 end
 
+def validate_sub_agent_tools!(payload, expected)
+  tool_names = payload.fetch("tools").map { |tool| tool["name"] }
+  assert(tool_names.include?("sub_agent") == expected,
+         "sub-agent tool advertisement did not match the request")
+  if expected
+    tool = payload.fetch("tools").find { |candidate| candidate["name"] == "sub_agent" }
+    assert(tool.fetch("parameters").fetch("required") == %w[prompt timeout_ms],
+           "sub-agent tool schema did not require prompt and timeout")
+  end
+end
+
 def input_text(payload)
   payload.dig("input", 0, "content", 0, "text")
 end
@@ -124,6 +135,42 @@ def validate_scenario!(scenario, request_number, payload)
                                          "call_id" => "call_write",
                                          "output" => "Created result.txt"} },
              "second request did not contain the real tool output")
+    end
+  when "sub-agent"
+    validate_coding_tools!(payload)
+    if request_number.zero?
+      validate_sub_agent_tools!(payload, true)
+      assert(input_text(payload) == "Ask a child agent",
+             "sub-agent scenario did not receive the parent prompt")
+    elsif request_number == 1
+      validate_sub_agent_tools!(payload, false)
+      assert(input_text(payload) == "Child task",
+             "sub-agent request did not receive the child prompt")
+    else
+      validate_sub_agent_tools!(payload, true)
+      output = payload.fetch("input").find do |item|
+        item["type"] == "function_call_output" && item["call_id"] == "call_sub_agent"
+      end
+      assert(output && output["output"] == "Child result",
+             "parent request did not contain the child result")
+    end
+  when "sub-agent-timeout"
+    validate_coding_tools!(payload)
+    if request_number.zero?
+      validate_sub_agent_tools!(payload, true)
+      assert(input_text(payload) == "Ask a blocked child agent",
+             "timeout scenario did not receive the parent prompt")
+    elsif request_number == 1
+      validate_sub_agent_tools!(payload, false)
+      assert(input_text(payload) == "Child task",
+             "timeout scenario did not receive the child prompt")
+    else
+      validate_sub_agent_tools!(payload, true)
+      output = payload.fetch("input").find do |item|
+        item["type"] == "function_call_output" && item["call_id"] == "call_sub_agent"
+      end
+      assert(output && output["output"] == "Error: Sub-agent timed out after 75 ms",
+             "parent request did not contain the child timeout")
     end
   when "tool-edit"
     validate_coding_tools!(payload)
@@ -355,6 +402,24 @@ def tool_call_response
   )
 end
 
+def sub_agent_call_response(timeout_ms: 1_000)
+  sse(
+    {type: "response.output_item.done",
+     item: {type: "function_call", call_id: "call_sub_agent", name: "sub_agent",
+            arguments: JSON.generate(prompt: "Child task", timeout_ms: timeout_ms)}},
+    completed
+  )
+end
+
+def blocked_read_call_response(path)
+  sse(
+    {type: "response.output_item.done",
+     item: {type: "function_call", call_id: "call_read", name: "read",
+            arguments: JSON.generate(path: path, offset: 0, limit: 1)}},
+    completed
+  )
+end
+
 def tool_final_response
   sse(
     {type: "response.output_item.done",
@@ -411,7 +476,7 @@ def round_limit_call_response(request_number)
   )
 end
 
-def response_for(scenario, request_number)
+def response_for(scenario, request_number, request_directory)
   case scenario
   when "text" then [200, "OK", "text/event-stream", text_response]
   when "paste" then [200, "OK", "text/event-stream", message_response("Paste received")]
@@ -439,6 +504,20 @@ def response_for(scenario, request_number)
   when "tool-write"
     [200, "OK", "text/event-stream",
      request_number.zero? ? tool_call_response : tool_final_response]
+  when "sub-agent"
+    body = case request_number
+           when 0 then sub_agent_call_response
+           when 1 then message_response("Child result")
+           else message_response("Parent received child result")
+           end
+    [200, "OK", "text/event-stream", body]
+  when "sub-agent-timeout"
+    body = case request_number
+           when 0 then sub_agent_call_response(timeout_ms: 75)
+           when 1 then blocked_read_call_response(File.join(request_directory, "blocked.fifo"))
+           else message_response("Recovered from child timeout")
+           end
+    [200, "OK", "text/event-stream", body]
   when "tool-edit"
     [200, "OK", "text/event-stream",
      request_number.zero? ? edit_call_response : message_response("Edited edit-target.txt")]
@@ -547,6 +626,8 @@ expected_requests = if scenario == "context-error-retry"
                       1
                     elsif scenario == "tool-round-limit"
                       TOOL_ROUND_LIMIT + 2
+                    elsif %w[sub-agent sub-agent-timeout].include?(scenario)
+                      3
                     elsif %w[tool-write tool-edit tool-shell-env tool-bash-denied compaction-resume incomplete-output interrupt-output interrupt-tool].include?(scenario)
                       2
                     else
@@ -554,9 +635,16 @@ expected_requests = if scenario == "context-error-retry"
                     end
 server = TCPServer.new("127.0.0.1", 0)
 File.write(port_file, "#{server.addr[1]}\n")
+if scenario == "sub-agent-timeout"
+  fifo = File.join(request_directory, "blocked.fifo")
+  abort "could not create blocked read fixture" unless system("mkfifo", fifo)
+  # Release a broken join after three seconds so the test fails instead of hanging.
+  Thread.new { sleep 3; File.open(fifo, "w") {} }
+end
 
 request_number = 0
 models_requested = false
+timeout_started_at = nil
 while request_number < expected_requests
   socket = nil
   begin
@@ -578,6 +666,10 @@ while request_number < expected_requests
                     "#{request_line}\r\n#{headers.inspect}\r\n\r\n#{body}")
       validate_common!(request_line, headers, payload)
       validate_scenario!(scenario, request_number, payload)
+      if scenario == "sub-agent-timeout" && request_number == 2
+        elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - timeout_started_at
+        assert(elapsed < 1.5, "sub-agent timeout blocked the parent for #{elapsed.round(2)} seconds")
+      end
       if scenario == "interrupt-output" && request_number.zero?
         socket.write(
           "HTTP/1.1 200 OK\r\n" \
@@ -608,7 +700,10 @@ while request_number < expected_requests
         )
         socket.close
       else
-        send_response(socket, *response_for(scenario, request_number))
+        send_response(socket, *response_for(scenario, request_number, request_directory))
+        if scenario == "sub-agent-timeout" && request_number.zero?
+          timeout_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        end
         if scenario == "interrupt-tool" && request_number.zero?
           sleep 0.1
           File.write(File.join(request_directory, "interrupt-ready"), "ready\n")
