@@ -29,6 +29,9 @@ namespace microcodex {
         std::string account_id;
         std::string model;
         std::string instructions;
+        // Thinking effort sent as "reasoning": {"effort": ...}; "persistent"
+        // is normalized to "disabled" on the wire, matching the official
+        // Codex client's resolve_reasoning_effort.
         std::string reasoning_effort = "medium";
         std::string endpoint = "https://chatgpt.com/backend-api/codex/responses";
         long idle_timeout_seconds = 300;

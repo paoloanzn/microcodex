@@ -23,6 +23,43 @@
 namespace {
 
     constexpr std::string_view default_model = "gpt-6-sol";
+    constexpr std::string_view default_reasoning_effort = "medium";
+
+    // Accepted effort values mirror the official Codex client's ReasoningEffort
+    // set (openai/codex codex-rs/protocol/src/openai_models.rs). The value is
+    // sent as-is in the request's "reasoning": {"effort": ...} field, except
+    // "persistent", which the Responses API calls "disabled" (the official
+    // client keeps "persistent" in local settings and sends "disabled").
+    constexpr std::string_view accepted_effort_values[] = {
+        "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "persistent",
+    };
+
+    std::string effortValueList() {
+        std::string list;
+        for (const std::string_view value : accepted_effort_values) {
+            if (!list.empty()) list += ", ";
+            list += value;
+        }
+        return list;
+    }
+
+    // Validates a user-facing effort value and returns the value sent on the
+    // wire. `source` names where the value came from ("--effort" or
+    // "MICROCODEX_EFFORT") for error messages.
+    std::expected<std::string, std::string> resolveReasoningEffort(const std::string_view effort,
+                                                                   const std::string_view source) {
+        if (effort.empty()) {
+            return std::unexpected(std::string(source) + " requires an effort value (expected one of: " + effortValueList() + ")");
+        }
+        if (effort == "persistent") {
+            return "disabled";
+        }
+        for (const std::string_view accepted : accepted_effort_values) {
+            if (effort == accepted) return std::string(effort);
+        }
+        return std::unexpected(std::string(source) + ": unsupported reasoning effort '" + std::string(effort) +
+                               "' (expected one of: " + effortValueList() + ")");
+    }
 
     void printUsage(const std::string_view executable) {
         std::cout << "Usage:\n"
@@ -30,9 +67,12 @@ namespace {
                   << "  " << executable << " logout\n"
                   << "  " << executable << " list\n"
                   << "  " << executable << " show ID\n"
-                  << "  " << executable << " [--model MODEL] resume ID [PROMPT]\n"
-                  << "  " << executable << " [--model MODEL]\n"
-                  << "  " << executable << " [--model MODEL] PROMPT\n";
+                  << "  " << executable << " [--model MODEL] [--effort EFFORT] resume ID [PROMPT]\n"
+                  << "  " << executable << " [--model MODEL] [--effort EFFORT]\n"
+                  << "  " << executable << " [--model MODEL] [--effort EFFORT] PROMPT\n"
+                  << "\n"
+                  << "Effort values: " << effortValueList() << " (default: medium)\n"
+                  << "  MICROCODEX_EFFORT selects the effort when --effort is absent.\n";
     }
 
     struct AgentRequest {
@@ -40,18 +80,36 @@ namespace {
         bool model_explicit;
         std::optional<std::string> prompt;
         std::optional<std::string> resume_id;
+        std::string reasoning_effort;
+        bool reasoning_effort_explicit = false;
     };
 
     std::expected<AgentRequest, std::string> parseAgentRequest(const int argc, char *argv[]) {
         std::string model(default_model);
         bool model_explicit = false;
+        std::string reasoning_effort(default_reasoning_effort);
+        bool reasoning_effort_explicit = false;
         int argument = 1;
-        if (argument < argc && std::string_view(argv[argument]) == "--model") {
-            if (++argument == argc || std::string_view(argv[argument]).empty()) {
-                return std::unexpected("--model requires a model name");
+        while (argument < argc) {
+            const std::string_view flag(argv[argument]);
+            if (flag == "--model") {
+                if (++argument == argc || std::string_view(argv[argument]).empty()) {
+                    return std::unexpected("--model requires a model name");
+                }
+                model = argv[argument++];
+                model_explicit = true;
+            } else if (flag == "--effort") {
+                if (++argument == argc) {
+                    return std::unexpected("--effort requires an effort value (expected one of: " + effortValueList() + ")");
+                }
+                auto resolved = resolveReasoningEffort(argv[argument], "--effort");
+                if (!resolved) return std::unexpected(resolved.error());
+                reasoning_effort = std::move(*resolved);
+                ++argument;
+                reasoning_effort_explicit = true;
+            } else {
+                break;
             }
-            model = argv[argument++];
-            model_explicit = true;
         }
         std::optional<std::string> resume_id;
         if (argument < argc && std::string_view(argv[argument]) == "resume") {
@@ -75,6 +133,8 @@ namespace {
             .prompt = prompt.empty() ? std::nullopt
                                      : std::optional<std::string>(std::move(prompt)),
             .resume_id = std::move(resume_id),
+            .reasoning_effort = std::move(reasoning_effort),
+            .reasoning_effort_explicit = reasoning_effort_explicit,
         };
     }
 
@@ -279,6 +339,17 @@ namespace {
                                     config.compaction.retained_context_tokens);
     }
 
+    std::expected<void, std::string> applyEffortEnvironment(microcodex::CodexApiConfig &config, const bool effort_explicit) {
+        // An explicit --effort flag wins over the environment.
+        if (effort_explicit) return {};
+        const char *value = std::getenv("MICROCODEX_EFFORT");
+        if (value == nullptr) return {};
+        auto resolved = resolveReasoningEffort(value, "MICROCODEX_EFFORT");
+        if (!resolved) return std::unexpected(resolved.error());
+        config.reasoning_effort = std::move(*resolved);
+        return {};
+    }
+
     std::expected<void, std::string> applyModelContextLimits(microcodex::CodexApiConfig &config) {
         auto models = microcodex::fetchModelContextLimits(config.endpoint, config.access_token, config.account_id);
         if (!models) return std::unexpected(models.error());
@@ -357,8 +428,16 @@ int main(const int argc, char *argv[]) {
     }
 
     auto config = microcodex::makeCodingAgentConfig(std::move(request->model));
+    config.reasoning_effort = std::move(request->reasoning_effort);
     config.resume_conversation = std::move(resume_path);
     microcodex::applyOAuthCredentials(config, **credentials);
+    // Validate the effort before any network attempt so a bad value fails
+    // with its own clear error instead of following a models-API warning.
+    auto effort_config = applyEffortEnvironment(config, request->reasoning_effort_explicit);
+    if (!effort_config) {
+        std::cerr << effort_config.error() << '\n';
+        return 1;
+    }
     // Keep transport selection at the executable boundary so black-box tests
     // can exercise the real CLI against a deterministic loopback server. The
     // default remains the production Codex endpoint.

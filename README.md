@@ -55,6 +55,18 @@ microcodex
 microcodex "Find the failing test, fix it, and run the relevant test suite"
 ```
 
+To choose how hard the model thinks, pass `--effort` or set `MICROCODEX_EFFORT`
+(the flag wins when both are given):
+
+```shell
+microcodex --effort high "Find the failing test, fix it, and run the relevant test suite"
+```
+
+Accepted values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`,
+`ultra`, and `persistent`; the default is `medium`. Empty or unknown values are
+rejected with an error. The value is sent to the API as the request's
+`reasoning.effort` field, the same field the official Codex client uses.
+
 > [!WARNING]
 > MicroCodex is not a sandbox. Before starting the user's shell, it applies a
 > simple lexical denylist that blocks forced file removal (`rm -f`/`rm -rf`),
