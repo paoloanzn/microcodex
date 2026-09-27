@@ -5,7 +5,7 @@ require "io/console"
 require "pty"
 require "timeout"
 
-abort "usage: invisible-paste-ui.rb APP" unless ARGV.length == 1
+abort "usage: invisible-paste-ui.rb APP [edit]" unless (1..2).cover?(ARGV.length)
 
 ENV["TERM"] = "xterm-256color" if ENV["TERM"].to_s.empty?
 paste = "before\u200bafter"
@@ -33,6 +33,13 @@ PTY.spawn(ARGV.fetch(0)) do |reader, writer, pid|
     sleep 0.02 until mutex.synchronize { output.include?(placeholder) }
   end
 
+  if ARGV[1] == "edit"
+    writer.write("\x7freplacement")
+    writer.flush
+    Timeout.timeout(5) do
+      sleep 0.02 until mutex.synchronize { output.include?("replacement") }
+    end
+  end
   writer.write("\r")
   writer.flush
   sleep 0.5

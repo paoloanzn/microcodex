@@ -139,6 +139,10 @@ def validate_scenario!(scenario, request_number, payload)
     expected = "before\u200bafter"
     assert(input_text(payload) == expected,
            "invisible paste was changed before sending")
+  when "invisible-paste-edited"
+    validate_coding_tools!(payload)
+    assert(input_text(payload) == "replacement",
+           "edited paste label left a partial marker in the prompt")
   when "keybindings"
     validate_coding_tools!(payload)
     assert(input_text(payload) == "alpha t1op\nmiddle2D\nbottom3",
@@ -454,6 +458,8 @@ def response_for(scenario, request_number)
   when "paste" then [200, "OK", "text/event-stream", message_response("Paste received")]
   when "invisible-paste"
     [200, "OK", "text/event-stream", message_response("Invisible paste received")]
+  when "invisible-paste-edited"
+    [200, "OK", "text/event-stream", message_response("Edited paste received")]
   when "keybindings" then [200, "OK", "text/event-stream", message_response("Keys received")]
   when "http-error"
     [429, "Too Many Requests", "application/json",

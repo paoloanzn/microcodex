@@ -577,12 +577,49 @@ namespace {
         return offsetAtVisualColumn(text, target_start, target_end, column);
     }
 
+    void keepCursorOutsidePaste(UiState &state) {
+        for (const auto &[placeholder, paste] : state.pending_pastes) {
+            const auto position = state.input.find(placeholder);
+            if (position != std::string::npos && state.input_cursor > position &&
+                state.input_cursor < position + placeholder.size()) {
+                state.input_cursor = position + placeholder.size();
+            }
+        }
+    }
+
+    void eraseInputRange(UiState &state, std::size_t first, std::size_t last) {
+        if (first == last) return;
+        // A placeholder is one editable unit, including for word and line erases.
+        bool expanded;
+        do {
+            expanded = false;
+            for (const auto &[placeholder, paste] : state.pending_pastes) {
+                const auto position = state.input.find(placeholder);
+                if (position != std::string::npos && first < position + placeholder.size() &&
+                    last > position && (first > position || last < position + placeholder.size())) {
+                    first = std::min(first, position);
+                    last = std::max(last, position + placeholder.size());
+                    expanded = true;
+                }
+            }
+        } while (expanded);
+        std::erase_if(state.pending_pastes, [&](const auto &entry) {
+            const auto position = state.input.find(entry.first);
+            return position != std::string::npos && first < position + entry.first.size() &&
+                   last > position;
+        });
+        state.input.erase(first, last - first);
+        state.input_cursor = first;
+        state.dirty = true;
+    }
+
     void insertCodepoint(UiState &state, const std::uint32_t codepoint) {
         char utf8[7]{};
         const int length = tb_utf8_unicode_to_char(utf8, codepoint);
         if (length <= 0) {
             return;
         }
+        keepCursorOutsidePaste(state);
         state.input.insert(state.input_cursor, utf8, static_cast<std::size_t>(length));
         state.input_cursor += static_cast<std::size_t>(length);
         state.dirty = true;
@@ -644,6 +681,7 @@ namespace {
         } else {
             displayed = std::move(state.paste);
         }
+        keepCursorOutsidePaste(state);
         state.input.insert(state.input_cursor, displayed);
         state.input_cursor += displayed.size();
         state.paste.clear();
@@ -1308,9 +1346,7 @@ namespace {
             return;
         }
         const std::size_t previous = previousUtf8(state.input, state.input_cursor);
-        state.input.erase(previous, state.input_cursor - previous);
-        state.input_cursor = previous;
-        state.dirty = true;
+        eraseInputRange(state, previous, state.input_cursor);
     }
 
     void erasePreviousWord(UiState &state) {
@@ -1318,9 +1354,7 @@ namespace {
             return;
         }
         const std::size_t start = previousWord(state.input, state.input_cursor);
-        state.input.erase(start, state.input_cursor - start);
-        state.input_cursor = start;
-        state.dirty = true;
+        eraseInputRange(state, start, state.input_cursor);
     }
 
     void eraseAtCursor(UiState &state) {
@@ -1328,8 +1362,7 @@ namespace {
             return;
         }
         const std::size_t next = nextUtf8(state.input, state.input_cursor);
-        state.input.erase(state.input_cursor, next - state.input_cursor);
-        state.dirty = true;
+        eraseInputRange(state, state.input_cursor, next);
     }
 
     void appendPastedKey(UiState &state, const tb_event &event) {
@@ -1401,14 +1434,11 @@ namespace {
             return;
         }
         if (event.key == TB_KEY_CTRL_U) {
-            state.input.erase(0, state.input_cursor);
-            state.input_cursor = 0;
-            state.dirty = true;
+            eraseInputRange(state, 0, state.input_cursor);
             return;
         }
         if (event.key == TB_KEY_CTRL_K) {
-            state.input.erase(state.input_cursor);
-            state.dirty = true;
+            eraseInputRange(state, state.input_cursor, state.input.size());
             return;
         }
         if (event.key == TB_KEY_CTRL_L) {
