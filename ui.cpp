@@ -89,6 +89,14 @@ namespace {
     struct UiState {
         std::deque<UiEntry> transcript;
         std::vector<std::pair<std::string, std::string>> pending_pastes;
+        // Messages typed while a turn is executing. Enter captures the
+        // composer into this queue instead of interrupting the active turn,
+        // and the finished turn drains it in order.
+        std::deque<std::string> message_queue;
+        // Earliest time a failed queued launch may be retried. A launch
+        // that fails keeps its message queued; the retry is rate-limited
+        // so a persistent failure can't spin the event loop.
+        std::chrono::steady_clock::time_point queue_retry_at{};
         std::string input;
         std::string paste;
         std::string status = "Ready";
@@ -1100,6 +1108,11 @@ namespace {
             appendSpan(line, "   scroll " + std::to_string(state.scroll),
                        muted_foreground | TB_DIM);
         }
+        if (!state.message_queue.empty()) {
+            appendSpan(line, "  ·  " + std::to_string(state.message_queue.size()) +
+                                 " queued",
+                       muted_foreground | TB_DIM);
+        }
         return line;
     }
 
@@ -1242,18 +1255,9 @@ namespace {
         return result;
     }
 
-    void startTurn(UiState &state, microcodex::CodexApi &api, TurnFuture &turn) {
-        if (turn.valid()) {
-            state.status = "A turn is already running";
-            state.dirty = true;
-            return;
-        }
-        if (state.input.empty()) {
-            state.status = "Enter a message first";
-            state.dirty = true;
-            return;
-        }
-
+    // Resolve paste placeholders and take the composed message out of the
+    // composer, leaving it empty and ready for the next input.
+    std::string composeMessage(UiState &state) {
         std::string message = std::move(state.input);
         for (auto &[placeholder, paste] : state.pending_pastes) {
             const std::size_t position = message.find(placeholder);
@@ -1264,7 +1268,36 @@ namespace {
         state.pending_pastes.clear();
         state.input.clear();
         state.input_cursor = 0;
+        return message;
+    }
+
+    // Starts an async turn for message. Returns false when the turn could
+    // not be launched; the caller then retains the message (queue or
+    // composer) instead of losing it.
+    bool beginTurn(UiState &state, microcodex::CodexApi &api, TurnFuture &turn,
+                   std::string message) {
         state.scroll = 0;
+
+        // Launch first: if starting the async turn fails, the message must
+        // not be recorded in the transcript (the caller retains it for
+        // retry instead of losing it).
+        try {
+            turn = std::async(std::launch::async, [&api, message] {
+                return api.sendUserMessage(message);
+            });
+        } catch (const std::exception &error) {
+            addNoticeOnce(state, EntryKind::Error,
+                          std::string("Could not start turn: ") + error.what());
+            state.status = "Could not start turn";
+            state.dirty = true;
+            return false;
+        } catch (...) {
+            addNoticeOnce(state, EntryKind::Error, "Could not start turn");
+            state.status = "Could not start turn";
+            state.dirty = true;
+            return false;
+        }
+
         addEntry(state, {
             .kind = EntryKind::User,
             .turn_id = {},
@@ -1275,26 +1308,83 @@ namespace {
             .markdown_cache = {},
             .edit = {},
         });
-
-        try {
-            turn = std::async(std::launch::async, [&api, message = std::move(message)] {
-                return api.sendUserMessage(message);
-            });
-            state.turn_started_at = std::chrono::steady_clock::now();
-            state.status = "Starting turn...";
-        } catch (const std::exception &error) {
-            addNoticeOnce(state, EntryKind::Error,
-                          std::string("Could not start turn: ") + error.what());
-            state.status = "Could not start turn";
-        } catch (...) {
-            addNoticeOnce(state, EntryKind::Error, "Could not start turn");
-            state.status = "Could not start turn";
-        }
+        state.turn_started_at = std::chrono::steady_clock::now();
+        state.status = "Starting turn...";
         state.dirty = true;
+        return true;
     }
 
-    void collectFinishedTurn(UiState &state, PendingEvents &pending, TurnFuture &turn) {
-        if (!turn.valid() || turn.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+    // Bound the queue so a stuck turn can't let it grow without limit.
+    constexpr std::size_t kMaxQueuedMessages = 64;
+    constexpr std::size_t kMaxQueuedBytes = 1u << 20;  // 1 MiB total
+
+    std::size_t queuedBytes(const UiState &state) {
+        std::size_t total = 0;
+        for (const auto &queued : state.message_queue) {
+            total += queued.size();
+        }
+        return total;
+    }
+
+    void startTurn(UiState &state, microcodex::CodexApi &api, TurnFuture &turn) {
+        if (turn.valid()) {
+            // The turn keeps running: capture the composer into the queue
+            // instead of dropping the input or interrupting the turn.
+            std::string message = composeMessage(state);
+            if (message.empty()) {
+                state.status = "Enter a message first";
+                state.dirty = true;
+                return;
+            }
+            if (state.message_queue.size() >= kMaxQueuedMessages ||
+                queuedBytes(state) + message.size() > kMaxQueuedBytes) {
+                // Don't drop the text: hand it back to the composer.
+                state.input = std::move(message);
+                state.input_cursor = state.input.size();
+                state.status = "Message queue is full";
+                state.dirty = true;
+                return;
+            }
+            state.message_queue.push_back(std::move(message));
+            state.status = "Message queued (" +
+                           std::to_string(state.message_queue.size()) + " pending)";
+            state.dirty = true;
+            return;
+        }
+        std::string message = composeMessage(state);
+        if (message.empty()) {
+            state.status = "Enter a message first";
+            state.dirty = true;
+            return;
+        }
+        if (!beginTurn(state, api, turn, message)) {
+            // The launch failed: hand the text back so it isn't lost.
+            state.input = std::move(message);
+            state.input_cursor = state.input.size();
+            state.dirty = true;
+        }
+    }
+
+    void collectFinishedTurn(UiState &state, PendingEvents &pending, microcodex::CodexApi &api, TurnFuture &turn) {
+        if (!turn.valid()) {
+            // No turn is running but a message is queued: a previous queued
+            // launch failed. Retry the head of the queue (rate-limited) so
+            // the retained message is not stuck; it stays queued until the
+            // launch succeeds. Quitting never retries: the queue is dropped
+            // on the way out.
+            if (!state.quitting && !state.message_queue.empty() &&
+                std::chrono::steady_clock::now() >= state.queue_retry_at) {
+                if (beginTurn(state, api, turn, state.message_queue.front())) {
+                    state.message_queue.pop_front();
+                } else {
+                    state.queue_retry_at = std::chrono::steady_clock::now() +
+                                           std::chrono::seconds(2);
+                }
+                state.dirty = true;
+            }
+            return;
+        }
+        if (turn.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
             return;
         }
 
@@ -1319,6 +1409,19 @@ namespace {
             state.status = "Turn failed";
         }
 
+        // The turn is done: send the oldest queued message next, keeping the
+        // FIFO order the user typed them in. Peek at the head and only pop
+        // after the turn starts successfully, so a failed launch retains
+        // the message instead of losing it.
+        if (!state.quitting && !state.message_queue.empty()) {
+            if (beginTurn(state, api, turn, state.message_queue.front())) {
+                state.message_queue.pop_front();
+            } else {
+                state.queue_retry_at = std::chrono::steady_clock::now() +
+                                       std::chrono::seconds(2);
+            }
+        }
+
         state.dirty = true;
     }
 
@@ -1336,6 +1439,10 @@ namespace {
             state.transcript.clear();
             state.transcript_bytes = 0;
             state.scroll = 0;
+            // A reset discards queued follow-ups too: a message retained
+            // across a failed launch must not run against the fresh
+            // conversation once the retry backoff elapses.
+            state.message_queue.clear();
             state.status = "Conversation reset";
         }
         state.dirty = true;
@@ -1541,9 +1648,11 @@ namespace {
         if (!turn.valid()) {
             return;
         }
+        // Quitting discards queued follow-ups: no new turn may start on the way out.
+        state.message_queue.clear();
         api.interrupt();
         turn.wait();
-        collectFinishedTurn(state, pending, turn);
+        collectFinishedTurn(state, pending, api, turn);
     }
 
 } // namespace
@@ -1584,7 +1693,7 @@ namespace microcodex {
         std::string terminal_error;
         while (!state.quitting) {
             applyPendingEvents(state, pending);
-            collectFinishedTurn(state, pending, turn);
+            collectFinishedTurn(state, pending, api, turn);
 
             if (state.dirty) {
                 const int rendered = render(state, turn.valid());

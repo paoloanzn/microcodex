@@ -45,7 +45,9 @@ execution, transcript replay, and final output together.
 The tool cases also verify that bash sees exports loaded from the user's shell
 startup file. PTY-driven interruption cases exercise the real termbox UI and
 prove that both partial assistant output and interrupted function calls are
-replayed when the user sends `continue`.
+replayed when the user sends `continue`. A PTY-driven queue case proves that
+messages typed while a turn is executing are captured into a queue instead of
+interrupting it, and are sent in order once the turn completes.
 Conversation scenarios also cover durable JSONL turns, listing and walking
 saved history, exact replay after resume, compaction checkpoints, and the
 invariant that compaction never removes the durable transcript.
