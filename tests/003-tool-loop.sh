@@ -64,3 +64,14 @@ STDOUT
 [tool bash] {"command":"rm -rf denylist-sentinel"}
 [tool bash failed] Error: command denied: forced file removal is blocked
 STDERR
+
+expect_process "T3.7: a stuck tool call times out instead of hanging the turn" 0 \
+    run_with_mock tool-timeout env MICROCODEX_TOOL_EXECUTION_TIMEOUT_SECONDS=2 \
+        CODEX_HOME="$tool_home" PATH="$TEST_BIN_DIR:$PATH" \
+        microcodex Run a slow shell command <<'STDOUT' 3<<'STDERR'
+Slow command timed out
+STDOUT
+
+[tool bash] {"command":"sleep 30"}
+[tool bash failed] Error: Tool execution timed out after 2 seconds
+STDERR
