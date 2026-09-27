@@ -430,7 +430,7 @@ int main(const int argc, char *argv[]) {
         }
         resume_path = std::move(*path);
     }
-    auto credentials = microcodex::loadOAuthCredentials();
+    auto credentials = microcodex::resolveCredentials();
     if (!credentials) {
         std::cerr << "Could not load saved credentials: " << credentials.error() << '\n';
         return 1;
@@ -440,10 +440,30 @@ int main(const int argc, char *argv[]) {
         return 1;
     }
 
+    // Keep transport selection at the executable boundary so black-box tests
+    // can exercise the real CLI against a deterministic loopback server. The
+    // default remains the production OAuth issuer.
+    microcodex::OAuthOptions oauth_options;
+    if (const char *issuer = std::getenv("MICROCODEX_OAUTH_ISSUER");
+        issuer != nullptr && issuer[0] != '\0') {
+        oauth_options.issuer = issuer;
+    }
+
+    // Refresh a stored token that is already past its expiry so the model
+    // catalog fetch below and the first turn both run on a valid token.
+    auto fresh = microcodex::ensureFreshCredentials(**credentials, oauth_options);
+    if (!fresh) {
+        std::cerr << "Warning: " << fresh.error() << '\n';
+    } else {
+        **credentials = std::move(*fresh);
+    }
+
     auto config = microcodex::makeCodingAgentConfig(std::move(request->model));
     config.reasoning_effort = std::move(request->reasoning_effort);
     config.resume_conversation = std::move(resume_path);
     microcodex::applyOAuthCredentials(config, **credentials);
+    config.oauth_credentials = **credentials;
+    config.oauth_options = std::move(oauth_options);
     // Validate the effort before any network attempt so a bad value fails
     // with its own clear error instead of following a models-API warning.
     auto effort_config = applyEffortEnvironment(config, request->reasoning_effort_explicit);
@@ -452,11 +472,15 @@ int main(const int argc, char *argv[]) {
         return 1;
     }
     // Keep transport selection at the executable boundary so black-box tests
-    // can exercise the real CLI against a deterministic loopback server. The
-    // default remains the production Codex endpoint.
+    // can exercise the real CLI against a deterministic loopback server.
+    // API keys authenticate against the OpenAI Platform rather than the
+    // ChatGPT Codex backend, so API-key mode targets the Platform responses
+    // endpoint; OAuth sessions keep the default Codex endpoint.
     if (const char *endpoint = std::getenv("MICROCODEX_API_ENDPOINT");
         endpoint != nullptr && endpoint[0] != '\0') {
         config.endpoint = endpoint;
+    } else if ((**credentials).api_key_mode) {
+        config.endpoint = "https://api.openai.com/v1/responses";
     }
     auto model_context = applyModelContextLimits(config);
     if (!model_context) {

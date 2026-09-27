@@ -2,6 +2,16 @@
 
 set -u
 
+# The mock suite must be hermetic: a developer's real OPENAI_API_KEY or
+# CODEX_HOME would leak into credential resolution and change behavior.
+# The credential-save failure switch is likewise cleared: T9.7 opts in
+# explicitly for its child process, and an inherited value would break the
+# normal-save cases T9.3/T9.4. Tests that need credentials opt back in
+# explicitly via `env`.
+unset OPENAI_API_KEY
+unset CODEX_HOME
+unset MICROCODEX_TEST_FAIL_CREDENTIAL_SAVE
+
 script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd) || exit 1
 ROOT_DIR=$(CDPATH= cd "$script_dir/.." && pwd) || exit 1
 TEST_DIR=$script_dir
@@ -172,7 +182,10 @@ run_with_mock() {
     done
 
     endpoint=http://127.0.0.1:$(sed -n '1p' "$port_file")/responses
-    MICROCODEX_API_ENDPOINT=$endpoint "$@"
+    # The CLI reads MICROCODEX_OAUTH_ISSUER for token refreshes, so the
+    # loopback fixture can also stand in for the OAuth token endpoint.
+    issuer=http://127.0.0.1:$(sed -n '1p' "$port_file")
+    MICROCODEX_API_ENDPOINT=$endpoint MICROCODEX_OAUTH_ISSUER=$issuer "$@"
     app_status=$?
     wait "$active_mock_pid"
     server_status=$?

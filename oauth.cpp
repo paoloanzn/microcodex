@@ -34,6 +34,7 @@
 #include <ctime>
 #include <expected>
 #include <filesystem>
+#include <iostream>
 #include <map>
 #include <memory>
 #include <optional>
@@ -532,7 +533,16 @@ namespace {
 
     // Shared token-endpoint transport. The initial code exchange is form encoded,
     // while refresh follows Codex and sends JSON, so content_type stays explicit.
-    std::expected<HttpResponse, std::string> postBody(const std::string &url, const std::string &body, const std::string &content_type, const long timeout_seconds) {
+    // The progress callback aborts the transfer when the stop token fires, so
+    // interrupting a turn also cancels a hung token request. A default (never
+    // signalled) token keeps the historical blocking behavior.
+    int refreshTransferProgress(void *user_data, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+        const auto *token = static_cast<const std::stop_token *>(user_data);
+        return token->stop_requested() ? 1 : 0;
+    }
+
+    std::expected<HttpResponse, std::string> postBody(const std::string &url, const std::string &body, const std::string &content_type, const long timeout_seconds,
+                                                      const std::stop_token &stop_token = {}) {
         if (timeout_seconds <= 0) {
             return std::unexpected("OAuth token request timeout must be greater than zero");
         }
@@ -568,7 +578,9 @@ namespace {
             !setOption(CURLOPT_ERRORBUFFER, curl_error.data()) ||
             !setOption(CURLOPT_USERAGENT, "microcodex") ||
             !setOption(CURLOPT_CONNECTTIMEOUT, timeout_seconds) ||
-            !setOption(CURLOPT_TIMEOUT, timeout_seconds) || !setOption(CURLOPT_NOSIGNAL, 1L)) {
+            !setOption(CURLOPT_TIMEOUT, timeout_seconds) || !setOption(CURLOPT_NOSIGNAL, 1L) ||
+            !setOption(CURLOPT_XFERINFOFUNCTION, &refreshTransferProgress) ||
+            !setOption(CURLOPT_XFERINFODATA, &stop_token) || !setOption(CURLOPT_NOPROGRESS, 0L)) {
             return std::unexpected("Could not configure OAuth token request");
         }
 
@@ -576,6 +588,9 @@ namespace {
         curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &response.status);
         if (!response.callback_error.empty()) {
             return std::unexpected(response.callback_error);
+        }
+        if (result == CURLE_ABORTED_BY_CALLBACK && stop_token.stop_requested()) {
+            return std::unexpected("OAuth token request interrupted");
         }
         if (result != CURLE_OK) {
             const std::string detail = curl_error[0] == '\0'
@@ -702,6 +717,46 @@ namespace {
             options.issuer.find_first_of("?#") != std::string::npos) {
             return std::unexpected("OAuth issuer must be an HTTP(S) origin "
                                    "without query or fragment");
+        }
+        if (options.issuer.starts_with("http://")) {
+            // A plaintext issuer would disclose the refresh token on the wire,
+            // so only loopback issuers are exempt: the black-box test harness
+            // overrides MICROCODEX_OAUTH_ISSUER with a 127.0.0.1 mock server.
+            // Parse the authority with libcurl's URL API rather than splitting
+            // at the first colon: userinfo can smuggle a remote host past a
+            // naive split, since "http://127.0.0.1:8080@issuer.example" has
+            // host issuer.example with userinfo "127.0.0.1:8080".
+            std::unique_ptr<CURLU, decltype(&curl_url_cleanup)> url(curl_url(), &curl_url_cleanup);
+            if (url == nullptr ||
+                curl_url_set(url.get(), CURLUPART_URL, options.issuer.c_str(), 0) != CURLUE_OK) {
+                return std::unexpected("OAuth issuer is not a valid URL");
+            }
+            char *user = nullptr;
+            const bool has_user =
+                curl_url_get(url.get(), CURLUPART_USER, &user, 0) == CURLUE_OK;
+            curl_free(user);
+            char *password = nullptr;
+            const bool has_password =
+                curl_url_get(url.get(), CURLUPART_PASSWORD, &password, 0) == CURLUE_OK;
+            curl_free(password);
+            if (has_user || has_password) {
+                return std::unexpected("OAuth issuer must not contain userinfo");
+            }
+            char *raw_host = nullptr;
+            if (curl_url_get(url.get(), CURLUPART_HOST, &raw_host, 0) != CURLUE_OK ||
+                raw_host == nullptr) {
+                curl_free(raw_host);
+                return std::unexpected("OAuth issuer is not a valid URL");
+            }
+            std::string host(raw_host);
+            curl_free(raw_host);
+            // libcurl keeps the brackets on IPv6 literals ("[::1]").
+            if (host.size() >= 2 && host.front() == '[' && host.back() == ']') {
+                host = host.substr(1, host.size() - 2);
+            }
+            if (host != "127.0.0.1" && host != "::1" && host != "localhost") {
+                return std::unexpected("OAuth issuer must use HTTPS unless it is a loopback address");
+            }
         }
         if (options.token_request_timeout_seconds <= 0) {
             return std::unexpected("OAuth token request timeout must be greater than zero");
@@ -1244,10 +1299,114 @@ namespace microcodex {
         return loadOAuthCredentials(path.value());
     }
 
+    std::expected<OAuthCredentials, std::string> apiKeyCredentials(std::string api_key) {
+        if (containsNewline(api_key)) {
+            return std::unexpected("API key cannot contain a newline");
+        }
+        OAuthCredentials credentials;
+        credentials.access_token = std::move(api_key);
+        credentials.api_key_mode = true;
+        return credentials;
+    }
+
+    std::expected<std::optional<OAuthCredentials>, std::string> resolveCredentials() {
+        if (const char *environment_key = std::getenv("OPENAI_API_KEY");
+            environment_key != nullptr && environment_key[0] != '\0') {
+            auto credentials = apiKeyCredentials(environment_key);
+            if (!credentials) {
+                return std::unexpected(credentials.error());
+            }
+            return std::optional<OAuthCredentials>{std::move(*credentials)};
+        }
+
+        auto path = defaultOAuthCredentialsPath();
+        if (!path) {
+            return std::unexpected(path.error());
+        }
+        auto contents = readSmallFile(*path);
+        if (!contents) {
+            return std::unexpected(contents.error());
+        }
+        if (!contents->has_value()) {
+            return std::optional<OAuthCredentials>{};
+        }
+
+        // A Codex auth.json may carry an API key next to (or instead of) the
+        // OAuth token set. It ranks below the environment variable above.
+        auto file_key = json::jsonStringMember(contents->value(), "OPENAI_API_KEY");
+        if (!file_key) {
+            return std::unexpected("Could not parse credentials: " + file_key.error());
+        }
+        if (file_key->has_value() && !file_key->value().empty()) {
+            auto credentials = apiKeyCredentials(std::move(file_key->value()));
+            if (!credentials) {
+                return std::unexpected(credentials.error());
+            }
+            return std::optional<OAuthCredentials>{std::move(*credentials)};
+        }
+
+        return loadOAuthCredentials(*path);
+    }
+
+    std::expected<long long, std::string> jwtExpirySeconds(const std::string_view payload) {
+        auto member = json::findJsonMember(payload, "exp");
+        if (!member) {
+            return std::unexpected(member.error());
+        }
+        if (!member->has_value()) {
+            return std::unexpected("JWT has no expiry claim");
+        }
+        long long seconds = 0;
+        const std::string_view text = member->value();
+        const auto [end, error] =
+            std::from_chars(text.data(), text.data() + text.size(), seconds);
+        if (error != std::errc{} || end != text.data() + text.size() || seconds < 0) {
+            return std::unexpected("JWT expiry claim is not an integer");
+        }
+        return seconds;
+    }
+
+    std::expected<bool, std::string> oauthAccessTokenExpired(const OAuthCredentials &credentials, const std::chrono::seconds refresh_skew) {
+        const std::string_view token = credentials.access_token;
+        const std::size_t first_dot = token.find('.');
+        const std::size_t second_dot = first_dot == std::string_view::npos
+                                           ? std::string_view::npos
+                                           : token.find('.', first_dot + 1);
+        if (first_dot == std::string_view::npos || second_dot == std::string_view::npos ||
+            token.find('.', second_dot + 1) != std::string_view::npos) {
+            // Opaque tokens carry no decodable expiry; rely on 401 handling.
+            return false;
+        }
+        auto payload =
+            base64UrlDecode(token.substr(first_dot + 1, second_dot - first_dot - 1));
+        if (!payload) {
+            return false;
+        }
+        auto expiry = jwtExpirySeconds(*payload);
+        if (!expiry) {
+            return false;
+        }
+        const auto expiry_time =
+            std::chrono::system_clock::time_point(std::chrono::seconds(*expiry));
+        return expiry_time <= std::chrono::system_clock::now() + refresh_skew;
+    }
+
     std::expected<void, std::string> saveOAuthCredentials(const OAuthCredentials &credentials, const std::filesystem::path &path) {
         auto validation = validateCredentials(credentials);
         if (!validation) {
             return validation;
+        }
+
+        // Deterministic test seam (see T9.7): setting
+        // MICROCODEX_TEST_FAIL_CREDENTIAL_SAVE forces the save to fail with
+        // the same EACCES error a blocked temp-file creation would produce.
+        // The LD_PRELOAD/DYLD interposition approach this replaces cannot
+        // reliably intercept the file-open entry point on Darwin, where the
+        // forced failure would silently never happen.
+        if (const char *force_save_failure = std::getenv("MICROCODEX_TEST_FAIL_CREDENTIAL_SAVE");
+            force_save_failure != nullptr && *force_save_failure != '\0') {
+            errno = EACCES;
+            return std::unexpected(systemError("Could not create temporary credentials file"));
         }
 
         // Preserve Codex's auth.json shape rather than inventing a second
@@ -1279,7 +1438,7 @@ namespace microcodex {
         return saveOAuthCredentials(credentials, path.value());
     }
 
-    std::expected<OAuthCredentials, std::string> refreshOAuthCredentials(const OAuthCredentials &credentials, OAuthOptions options) {
+    std::expected<OAuthCredentials, std::string> refreshOAuthCredentials(const OAuthCredentials &credentials, OAuthOptions options, std::stop_token stop_token) {
         auto credential_validation = validateCredentials(credentials);
         if (!credential_validation) {
             return std::unexpected(credential_validation.error());
@@ -1297,7 +1456,7 @@ namespace microcodex {
         body += '}';
         auto response =
             postBody(options.issuer + "/oauth/token", body, "Content-Type: application/json",
-                     options.token_request_timeout_seconds);
+                     options.token_request_timeout_seconds, stop_token);
         if (!response) {
             return std::unexpected(response.error());
         }
@@ -1331,6 +1490,30 @@ namespace microcodex {
             refreshed.refresh_token = std::move(refresh_token.value().value());
         }
         return refreshed;
+    }
+
+    std::expected<OAuthCredentials, std::string> ensureFreshCredentials(const OAuthCredentials &credentials, OAuthOptions options) {
+        if (credentials.api_key_mode || credentials.refresh_token.empty()) {
+            return credentials;
+        }
+        auto expired = oauthAccessTokenExpired(credentials);
+        if (!expired || !*expired) {
+            // Unparseable tokens fall back to 401-driven refresh per request.
+            return credentials;
+        }
+        auto refreshed = refreshOAuthCredentials(credentials, std::move(options));
+        if (!refreshed) {
+            return std::unexpected(refreshed.error());
+        }
+        auto saved = saveOAuthCredentials(*refreshed);
+        if (!saved) {
+            // A save failure must not discard a valid refreshed token: keep
+            // it for this session and warn, so the turn still authenticates.
+            // The next process will refresh and retry the save on its own.
+            std::cerr << "Warning: " << saved.error()
+                      << "; using the refreshed token for this session only\n";
+        }
+        return std::move(*refreshed);
     }
 
     // unlink() removes only a file or symlink; unlike filesystem::remove it will
