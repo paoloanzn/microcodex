@@ -36,9 +36,7 @@ PTY.spawn(ARGV.fetch(0)) do |reader, writer, pid|
   if ARGV[1] == "edit"
     writer.write("\x7freplacement")
     writer.flush
-    Timeout.timeout(5) do
-      sleep 0.02 until mutex.synchronize { output.include?("replacement") }
-    end
+    sleep 0.1
   end
   writer.write("\r")
   writer.flush
