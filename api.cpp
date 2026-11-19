@@ -14,6 +14,7 @@
 #include <expected>
 #include <filesystem>
 #include <future>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -516,20 +517,26 @@ std::expected<void, std::string> validateRequestTools(
     return {};
 }
 
-// Appends the input items, then final_item when present, as JSON array elements.
-void appendInputItems(std::string& body, const std::span<const std::string> items, const std::string_view final_item) {
-    bool first = true;
-    for (const std::string& item : items) {
-        if (!first) {
-            body += ',';
-        }
+// Appends leading_item, the input items, then final_item as JSON array
+// elements. Empty leading and final items are skipped.
+void appendInputItems(std::string& body, const std::string_view leading_item, const std::span<const std::string> items,
+                      const std::string_view final_item) {
+    const std::size_t start = body.size();
+    const auto append = [&body, start](const std::string_view item) {
+        if (body.size() != start) body += ',';
         body += item;
-        first = false;
-    }
-    if (!final_item.empty()) {
-        if (!items.empty()) body += ',';
-        body += final_item;
-    }
+    };
+    if (!leading_item.empty()) append(leading_item);
+    for (const std::string& item : items) append(item);
+    if (!final_item.empty()) append(final_item);
+}
+
+// The global AGENTS.md text, wrapped the way the model expects user
+// instructions.
+std::string userInstructionsItem(const std::string_view text) {
+    if (text.empty()) return {};
+    return microcodex::userMessageItem("# AGENTS.md instructions\n\n<INSTRUCTIONS>\n" + std::string(text) +
+                                       "\n</INSTRUCTIONS>");
 }
 
 void appendToolDefinitions(std::string& body,
@@ -676,6 +683,7 @@ std::expected<void, std::string> validateReasoningEffort(const std::string_view 
 
 CodexApi::CodexApi(CodexApiConfig config)
     : config_(std::move(config)),
+      user_instructions_item_(userInstructionsItem(config_.user_instructions)),
       compactor_(config_.compaction),
       installation_id_(makeUuid()),
       session_id_(makeUuid()) {}
@@ -932,7 +940,7 @@ std::expected<CodexApiStatus, std::string> CodexApi::status() const {
         .model = config_.model,
         .reasoning_effort = config_.reasoning_effort,
         .saved_turns = conversation_file_ ? conversation_file_->turnCount() : 0,
-        .context_tokens = std::max(reported_input_tokens_, estimateContextTokens(input_items_)),
+        .context_tokens = std::max(reported_input_tokens_, estimatedContextTokens()),
         .context_limit_tokens = config_.compaction.context_limit_tokens,
         .compact_at_tokens = config_.compaction.compact_at_tokens,
     };
@@ -969,9 +977,17 @@ std::size_t CodexApi::savedTurnCount() const {
     return conversation_file_ ? conversation_file_->turnCount() : 0;
 }
 
+std::size_t CodexApi::estimatedContextTokens() const {
+    const std::size_t history = estimateContextTokens(input_items_);
+    const std::size_t instructions = estimateContextTokens(std::span(&user_instructions_item_, 1));
+    return history > std::numeric_limits<std::size_t>::max() - instructions ? std::numeric_limits<std::size_t>::max()
+                                                                            : history + instructions;
+}
+
 std::expected<std::string, std::string> CodexApi::buildRequestBody(const std::span<const std::string> items,
                                                                    const std::string_view instructions,
                                                                    const bool include_tools,
+                                                                   const std::string_view leading_item,
                                                                    const std::string_view final_item) const {
     auto valid_config = validateRequestConfig(config_);
     if (!valid_config) return std::unexpected(valid_config.error());
@@ -989,7 +1005,7 @@ std::expected<std::string, std::string> CodexApi::buildRequestBody(const std::sp
     body += ",\"instructions\":";
     appendJsonString(body, instructions);
     body += ",\"input\":[";
-    appendInputItems(body, items, final_item);
+    appendInputItems(body, leading_item, items, final_item);
     body += R"(],"tools":[)";
     if (include_tools) {
         appendToolDefinitions(body, config_.tools);
@@ -1201,7 +1217,7 @@ std::expected<CodexApiResponse, std::string> CodexApi::requestWithToolExecution(
 
 std::expected<CodexApiResponse, std::string> CodexApi::request(const std::stop_token stop_token,
                                                                const std::string_view turn_id) {
-    auto request_body = buildRequestBody(input_items_, config_.instructions, true);
+    auto request_body = buildRequestBody(input_items_, config_.instructions, true, user_instructions_item_);
     if (!request_body) {
         return std::unexpected(request_body.error());
     }
@@ -1321,7 +1337,7 @@ std::expected<CodexApi::ModelResponse, std::string> CodexApi::performRequest(con
 std::expected<std::string, std::string> CodexApi::requestSummary(const std::span<const std::string> items,
                                                                  const std::stop_token stop_token) {
     const std::string prompt = userMessageItem("Produce the conversation summary now.");
-    auto body = buildRequestBody(items, ContextCompactor::summaryInstructions(), false, prompt);
+    auto body = buildRequestBody(items, ContextCompactor::summaryInstructions(), false, {}, prompt);
     if (!body) return std::unexpected(body.error());
 
     auto sampled = performRequest(*body, stop_token, makeUuid(), false);
@@ -1336,7 +1352,7 @@ std::expected<void, std::string> CodexApi::compactContext(const std::stop_token 
                                                           std::size_t& protected_start, const bool force) {
     const ContextUsage usage{
         .reported_input_tokens = reported_input_tokens_,
-        .estimated_tokens = estimateContextTokens(input_items_),
+        .estimated_tokens = estimatedContextTokens(),
     };
     if (!force && !compactor_.needed(usage)) return {};
 

@@ -24,6 +24,7 @@ namespace {
 constexpr std::size_t maximum_skill_file_bytes = std::size_t{1024} * 1024;
 constexpr std::size_t maximum_skill_entries = 20'000;
 constexpr int maximum_scan_depth = 6;
+constexpr std::size_t maximum_global_instructions_bytes = std::size_t{32} * 1024;
 
 std::string_view trim(std::string_view value) {
     while (!value.empty() && (std::isspace(static_cast<unsigned char>(value.front())) != 0)) {
@@ -152,14 +153,19 @@ std::optional<SkillMetadata> readSkillMetadata(const std::filesystem::path& path
 
 }  // namespace
 
-std::filesystem::path codexSkillsDirectory() {
+std::filesystem::path codexHomeDirectory() {
     if (const char* codex_home = std::getenv("CODEX_HOME"); codex_home != nullptr && *codex_home != '\0') {
-        return std::filesystem::path(codex_home) / "skills";
+        return codex_home;
     }
     if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
-        return std::filesystem::path(home) / ".codex" / "skills";
+        return std::filesystem::path(home) / ".codex";
     }
     return {};
+}
+
+std::filesystem::path codexSkillsDirectory() {
+    const std::filesystem::path home = codexHomeDirectory();
+    return home.empty() ? home : home / "skills";
 }
 
 std::vector<SkillMetadata> discoverCodexSkills() {
@@ -207,6 +213,43 @@ std::string availableSkillsInstructions() {
         catalog += "- " + skill.name + ": " + skill.description + " (file: " + skill.path.string() + ")\n";
     }
     return catalog;
+}
+
+std::string loadGlobalInstructions() {
+    const std::filesystem::path home = codexHomeDirectory();
+    if (home.empty()) return {};
+
+    for (const char* name : {"AGENTS.override.md", "AGENTS.md"}) {
+        const std::filesystem::path path = home / name;
+        std::error_code error;
+        if (!std::filesystem::is_regular_file(path, error)) continue;
+
+        std::ifstream input(path, std::ios::binary);
+        std::string text(maximum_global_instructions_bytes + 1, '\0');
+        input.read(text.data(), static_cast<std::streamsize>(text.size()));
+        if (input.bad() || (!input && !input.eof())) continue;
+        text.resize(static_cast<std::size_t>(input.gcount()));
+
+        const bool cut = text.size() > maximum_global_instructions_bytes;
+        if (cut) {
+            // Cut before a UTF-8 continuation byte so no character is split.
+            std::size_t end = maximum_global_instructions_bytes;
+            while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xC0U) == 0x80U) --end;
+            text.resize(end);
+        }
+        std::string loaded(trim(text));
+        if (loaded.empty()) continue;
+        if (cut) {
+            // Tell the model what is missing and where to read the rest.
+            const auto size = std::filesystem::file_size(path, error);
+            const std::filesystem::path absolute = std::filesystem::absolute(path, error).lexically_normal();
+            loaded += "\n<truncated>Only the first " + std::to_string(text.size()) + " of " +
+                      (error ? "more" : std::to_string(size)) + " bytes of " +
+                      (absolute.empty() ? path : absolute).string() + " were loaded.</truncated>";
+        }
+        return loaded;
+    }
+    return {};
 }
 
 }  // namespace microcodex

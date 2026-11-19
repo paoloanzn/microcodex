@@ -44,8 +44,9 @@ which is the smaller of `compact_at_tokens` and `context_limit_tokens`. The
 size is the larger of two numbers:
 
 - `usage.input_tokens` reported by the last completed request;
-- an estimate of the current items: their total bytes divided by 3, rounded
-  up (`estimateContextTokens()`). Code and JSON use more tokens per byte than
+- an estimate of the current items, plus the
+  [global AGENTS.md](turn-lifecycle.md#the-global-agentsmd) message: their
+  total bytes divided by 3, rounded up (`estimateContextTokens()`). Code and JSON use more tokens per byte than
   prose, so this is deliberately cautious, and it needs no tokenizer.
 
 The estimate matters because the reported count is one request old. A large

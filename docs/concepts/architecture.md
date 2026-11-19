@@ -86,7 +86,7 @@ flowchart TB
 | `response-item.cpp` | Builds and inspects Responses API items (messages, function calls, function call outputs). |
 | `model-catalog.cpp` | Fetches `/models` and turns a model's context window into compaction limits. |
 | `agent.cpp` | `makeCodingTools()` and `makeCodingAgentConfig()`: the five built-in tools and the instructions sent with every request. |
-| `system-prompt.cpp`, `skills.cpp` | The base instructions, and the catalog of `SKILL.md` files appended to them. |
+| `system-prompt.cpp`, `skills.cpp` | The base instructions, the catalog of `SKILL.md` files appended to them, and the global `AGENTS.md` loader. |
 | `tool.h`, `tool.cpp` | The tool interface. See [tools](tools.md). |
 | `read.cpp`, `write.cpp`, `edit.cpp`, `glob.cpp`, `bash.cpp`, `bash-safety.cpp` | The built-in tools. See [built-in tools](../reference/built-in-tools.md). |
 | `http.cpp` | `performHttpRequest()`: one synchronous libcurl request with streaming callbacks, timeouts and cancellation. |

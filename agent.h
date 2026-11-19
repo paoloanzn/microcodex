@@ -16,8 +16,9 @@ namespace microcodex {
 // overlapping filesystem mutations when executing their calls in parallel.
 std::vector<std::shared_ptr<const ToolBase>> makeCodingTools();
 
-// Provides the model instructions and tool set common to the terminal
-// agent. Authentication is deliberately left to the caller.
+// Provides the model instructions, the global AGENTS.md and the tool set
+// common to the terminal agent. Authentication is deliberately left to the
+// caller.
 CodexApiConfig makeCodingAgentConfig(std::string model);
 
 }  // namespace microcodex
