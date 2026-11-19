@@ -219,6 +219,18 @@ def validate_scenario!(scenario, request_number, payload)
                "Error: Tool execution timed out after 2 seconds",
              "slow tool call did not time out with the expected error")
     end
+  when "tool-timeout-batch"
+    validate_coding_tools!(payload)
+    if request_number.zero?
+      assert(input_text(payload) == "Read the blocked pipes",
+             "timeout batch scenario did not receive the prompt")
+    else
+      outputs = payload.fetch("input").select { |item| item["type"] == "function_call_output" }
+      assert(outputs.map { |item| item["call_id"] } == BLOCKED_READ_CALLS,
+             "timeout batch request did not contain every tool output in call order")
+      assert(outputs.all? { |item| item["output"] == "Error: Tool execution timed out after 1 seconds" },
+             "blocked reads did not time out with the expected error")
+    end
   when "incomplete-output"
     validate_coding_tools!(payload)
     if request_number.zero?
@@ -462,6 +474,19 @@ def timeout_call_response
   )
 end
 
+# A read of a FIFO with no writer blocks in open() and never observes its stop
+# token, so these calls exercise the non-cooperative timeout path.
+BLOCKED_READ_CALLS = %w[call_fifo_1 call_fifo_2 call_fifo_3 call_fifo_4].freeze
+
+def blocked_read_calls_response
+  calls = BLOCKED_READ_CALLS.each_with_index.map do |call_id, index|
+    {type: "response.output_item.done",
+     item: {type: "function_call", call_id: call_id, name: "read",
+            arguments: JSON.generate(path: "fifo-#{index + 1}", offset: 0, limit: 16)}}
+  end
+  sse(*calls, completed)
+end
+
 def round_limit_call_response(request_number)
   sse(
     {type: "response.output_item.done",
@@ -519,6 +544,9 @@ def response_for(scenario, request_number)
   when "tool-timeout"
     [200, "OK", "text/event-stream",
      request_number.zero? ? timeout_call_response : message_response("Slow command timed out")]
+  when "tool-timeout-batch"
+    [200, "OK", "text/event-stream",
+     request_number.zero? ? blocked_read_calls_response : message_response("Blocked reads timed out")]
   when "incomplete-output"
     body = request_number.zero? ? incomplete_response("Partial limited answer") :
                                   message_response("Continued limited answer")
@@ -618,7 +646,7 @@ expected_requests = if scenario == "context-error-retry"
                       1
                     elsif scenario == "tool-round-limit"
                       TOOL_ROUND_LIMIT + 2
-                    elsif %w[tool-write tool-edit tool-shell-env tool-bash-denied tool-timeout compaction-resume incomplete-output interrupt-output interrupt-tool].include?(scenario)
+                    elsif %w[tool-write tool-edit tool-shell-env tool-bash-denied tool-timeout tool-timeout-batch compaction-resume incomplete-output interrupt-output interrupt-tool].include?(scenario)
                       2
                     else
                       1
