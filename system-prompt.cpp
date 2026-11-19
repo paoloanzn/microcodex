@@ -5,8 +5,8 @@
 
 namespace microcodex {
 
-    std::string_view codingAgentSystemPrompt() {
-        return R"MCPROMPT(You are MicroCodex, an agent based on GPT-5. You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled.
+std::string_view codingAgentSystemPrompt() {
+    return R"MCPROMPT(You are MicroCodex, an agent based on GPT-5. You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled.
 
 # Personality
 
@@ -154,6 +154,6 @@ A skill is a set of instructions provided through a `SKILL.md` file. The skills 
 - Safety and fallback: If a skill cannot be applied cleanly, state the issue, choose the best alternative, and continue.
 
 The user's instructions take precedence over guidelines provided in a skill.)MCPROMPT";
-    }
+}
 
-} // namespace microcodex
+}  // namespace microcodex

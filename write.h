@@ -3,11 +3,11 @@
 
 #pragma once
 
-#include <string>
 #include <expected>
+#include <string>
 
 namespace microcodex {
 
-    std::expected<int, std::string> write(const std::string& path, std::string_view content);
+std::expected<int, std::string> write(const std::string& path, std::string_view content);
 
-} // namespace microcodex
+}  // namespace microcodex

@@ -7,8 +7,8 @@
 
 namespace microcodex {
 
-    // Base coding-agent instructions. Session-specific context such as the
-    // available skills catalog is appended when the agent config is created.
-    std::string_view codingAgentSystemPrompt();
+// Base coding-agent instructions. Session-specific context such as the
+// available skills catalog is appended when the agent config is created.
+std::string_view codingAgentSystemPrompt();
 
-} // namespace microcodex
+}  // namespace microcodex

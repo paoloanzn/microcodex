@@ -8,7 +8,7 @@
 
 namespace microcodex {
 
-    // Expands pattern and returns matching paths separated by newlines.
-    std::expected<std::string, std::string> glob(const std::string& pattern);
+// Expands pattern and returns matching paths separated by newlines.
+std::expected<std::string, std::string> glob(const std::string& pattern);
 
-} // namespace microcodex
+}  // namespace microcodex

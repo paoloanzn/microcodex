@@ -1,15 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Paolo Anzani
 // SPDX-License-Identifier: Apache-2.0
 
-#include "agent.h"
-#include "conversation.h"
-#include "model-catalog.h"
-#include "oauth.h"
-#include "response-item.h"
-#include "ui.h"
-
-#include <chrono>
 #include <charconv>
+#include <chrono>
 #include <cstdlib>
 #include <expected>
 #include <filesystem>
@@ -20,285 +13,291 @@
 #include <string_view>
 #include <utility>
 
+#include "agent.h"
+#include "conversation.h"
+#include "model-catalog.h"
+#include "oauth.h"
+#include "response-item.h"
+#include "ui.h"
+
 namespace {
 
-    constexpr std::string_view default_model = "gpt-6-sol";
-    constexpr std::string_view default_reasoning_effort = "medium";
+constexpr std::string_view default_model = "gpt-6-sol";
+constexpr std::string_view default_reasoning_effort = "medium";
 
-    // Accepted effort values mirror the official Codex client's ReasoningEffort
-    // set (openai/codex codex-rs/protocol/src/openai_models.rs). The value is
-    // sent as-is in the request's "reasoning": {"effort": ...} field, except
-    // "persistent", which the Responses API calls "disabled" (the official
-    // client keeps "persistent" in local settings and sends "disabled"), and
-    // "ultra", which maps to the gpt-6-sol wire top "max".
-    constexpr std::string_view accepted_effort_values[] = {
-        "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "persistent",
-    };
+// Accepted effort values mirror the official Codex client's ReasoningEffort
+// set (openai/codex codex-rs/protocol/src/openai_models.rs). The value is
+// sent as-is in the request's "reasoning": {"effort": ...} field, except
+// "persistent", which the Responses API calls "disabled" (the official
+// client keeps "persistent" in local settings and sends "disabled"), and
+// "ultra", which maps to the gpt-6-sol wire top "max".
+constexpr std::string_view accepted_effort_values[] = {
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "persistent",
+};
 
-    std::string effortValueList() {
-        std::string list;
-        for (const std::string_view value : accepted_effort_values) {
-            if (!list.empty()) list += ", ";
-            list += value;
-        }
-        return list;
+std::string effortValueList() {
+    std::string list;
+    for (const std::string_view value : accepted_effort_values) {
+        if (!list.empty()) list += ", ";
+        list += value;
     }
+    return list;
+}
 
-    // Validates a user-facing effort value and returns the value sent on the
-    // wire. `source` names where the value came from ("--effort" or
-    // "MICROCODEX_EFFORT") for error messages.
-    std::expected<std::string, std::string> resolveReasoningEffort(const std::string_view effort,
-                                                                   const std::string_view source) {
-        if (effort.empty()) {
-            return std::unexpected(std::string(source) + " requires an effort value (expected one of: " + effortValueList() + ")");
-        }
-        if (effort == "persistent") {
-            return "disabled";
-        }
-        // The gpt-6-sol wire set tops out at "max" (docs list
-        // none/low/medium/high/xhigh/max), so the higher "ultra" tier maps
-        // down to it instead of sending an unsupported value.
-        if (effort == "ultra") {
-            return "max";
-        }
-        for (const std::string_view accepted : accepted_effort_values) {
-            if (effort == accepted) return std::string(effort);
-        }
-        return std::unexpected(std::string(source) + ": unsupported reasoning effort '" + std::string(effort) +
-                               "' (expected one of: " + effortValueList() + ")");
+// Validates a user-facing effort value and returns the value sent on the
+// wire. `source` names where the value came from ("--effort" or
+// "MICROCODEX_EFFORT") for error messages.
+std::expected<std::string, std::string> resolveReasoningEffort(const std::string_view effort,
+                                                               const std::string_view source) {
+    if (effort.empty()) {
+        return std::unexpected(std::string(source) +
+                               " requires an effort value (expected one of: " + effortValueList() + ")");
     }
-
-    void printUsage(const std::string_view executable) {
-        std::cout << "Usage:\n"
-                  << "  " << executable << " login [--device-auth]\n"
-                  << "  " << executable << " logout\n"
-                  << "  " << executable << " list\n"
-                  << "  " << executable << " show ID\n"
-                  << "  " << executable << " [--model MODEL] [--effort EFFORT] resume ID [PROMPT]\n"
-                  << "  " << executable << " [--model MODEL] [--effort EFFORT]\n"
-                  << "  " << executable << " [--model MODEL] [--effort EFFORT] PROMPT\n"
-                  << "\n"
-                  << "Effort values: " << effortValueList() << " (default: medium)\n"
-                  << "  MICROCODEX_EFFORT selects the effort when --effort is absent.\n";
+    if (effort == "persistent") {
+        return "disabled";
     }
+    // The gpt-6-sol wire set tops out at "max" (docs list
+    // none/low/medium/high/xhigh/max), so the higher "ultra" tier maps
+    // down to it instead of sending an unsupported value.
+    if (effort == "ultra") {
+        return "max";
+    }
+    for (const std::string_view accepted : accepted_effort_values) {
+        if (effort == accepted) return std::string(effort);
+    }
+    return std::unexpected(std::string(source) + ": unsupported reasoning effort '" + std::string(effort) +
+                           "' (expected one of: " + effortValueList() + ")");
+}
 
-    struct AgentRequest {
-        std::string model;
-        bool model_explicit;
-        std::optional<std::string> prompt;
-        std::optional<std::string> resume_id;
-        std::string reasoning_effort;
-        bool reasoning_effort_explicit = false;
-    };
+void printUsage(const std::string_view executable) {
+    std::cout << "Usage:\n"
+              << "  " << executable << " login [--device-auth]\n"
+              << "  " << executable << " logout\n"
+              << "  " << executable << " list\n"
+              << "  " << executable << " show ID\n"
+              << "  " << executable << " [--model MODEL] [--effort EFFORT] resume ID [PROMPT]\n"
+              << "  " << executable << " [--model MODEL] [--effort EFFORT]\n"
+              << "  " << executable << " [--model MODEL] [--effort EFFORT] PROMPT\n"
+              << "\n"
+              << "Effort values: " << effortValueList() << " (default: medium)\n"
+              << "  MICROCODEX_EFFORT selects the effort when --effort is absent.\n";
+}
 
-    std::expected<AgentRequest, std::string> parseAgentRequest(const int argc, char *argv[]) {
-        std::string model(default_model);
-        bool model_explicit = false;
-        std::string reasoning_effort(default_reasoning_effort);
-        bool reasoning_effort_explicit = false;
-        int argument = 1;
-        while (argument < argc) {
-            const std::string_view flag(argv[argument]);
-            if (flag == "--model") {
-                if (++argument == argc) {
-                    return std::unexpected("--model requires a model name");
-                }
-                const std::string_view value(argv[argument]);
-                // An option-looking token is not a model name; --model is
-                // still missing its value.
-                if (value.empty() || value.starts_with("--")) {
-                    return std::unexpected("--model requires a model name");
-                }
-                model = argv[argument++];
-                model_explicit = true;
-            } else if (flag == "--effort") {
-                if (++argument == argc) {
-                    return std::unexpected("--effort requires an effort value (expected one of: " + effortValueList() + ")");
-                }
-                auto resolved = resolveReasoningEffort(argv[argument], "--effort");
-                if (!resolved) return std::unexpected(resolved.error());
-                reasoning_effort = std::move(*resolved);
-                ++argument;
-                reasoning_effort_explicit = true;
-            } else {
-                break;
+struct AgentRequest {
+    std::string model;
+    bool model_explicit;
+    std::optional<std::string> prompt;
+    std::optional<std::string> resume_id;
+    std::string reasoning_effort;
+    bool reasoning_effort_explicit = false;
+};
+
+std::expected<AgentRequest, std::string> parseAgentRequest(const int argc, char* argv[]) {
+    std::string model(default_model);
+    bool model_explicit = false;
+    std::string reasoning_effort(default_reasoning_effort);
+    bool reasoning_effort_explicit = false;
+    int argument = 1;
+    while (argument < argc) {
+        const std::string_view flag(argv[argument]);
+        if (flag == "--model") {
+            if (++argument == argc) {
+                return std::unexpected("--model requires a model name");
             }
-        }
-        std::optional<std::string> resume_id;
-        if (argument < argc && std::string_view(argv[argument]) == "resume") {
+            const std::string_view value(argv[argument]);
+            // An option-looking token is not a model name; --model is
+            // still missing its value.
+            if (value.empty() || value.starts_with("--")) {
+                return std::unexpected("--model requires a model name");
+            }
+            model = argv[argument++];
+            model_explicit = true;
+        } else if (flag == "--effort") {
+            if (++argument == argc) {
+                return std::unexpected("--effort requires an effort value (expected one of: " + effortValueList() +
+                                       ")");
+            }
+            auto resolved = resolveReasoningEffort(argv[argument], "--effort");
+            if (!resolved) return std::unexpected(resolved.error());
+            reasoning_effort = std::move(*resolved);
             ++argument;
-            if (argument == argc || std::string_view(argv[argument]).empty()) {
-                return std::unexpected("resume requires a conversation ID");
-            }
-            resume_id = argv[argument++];
+            reasoning_effort_explicit = true;
+        } else {
+            break;
         }
-
-        std::string prompt;
-        for (; argument < argc; ++argument) {
-            if (!prompt.empty()) {
-                prompt += ' ';
-            }
-            prompt += argv[argument];
+    }
+    std::optional<std::string> resume_id;
+    if (argument < argc && std::string_view(argv[argument]) == "resume") {
+        ++argument;
+        if (argument == argc || std::string_view(argv[argument]).empty()) {
+            return std::unexpected("resume requires a conversation ID");
         }
-        return AgentRequest{
-            .model = std::move(model),
-            .model_explicit = model_explicit,
-            .prompt = prompt.empty() ? std::nullopt
-                                     : std::optional<std::string>(std::move(prompt)),
-            .resume_id = std::move(resume_id),
-            .reasoning_effort = std::move(reasoning_effort),
-            .reasoning_effort_explicit = reasoning_effort_explicit,
-        };
+        resume_id = argv[argument++];
     }
 
-    std::expected<std::filesystem::path, std::string> conversationPath(const std::string_view id) {
-        if (id.empty() || id.find('/') != std::string_view::npos || id == "." || id == "..") {
-            return std::unexpected("Invalid conversation ID");
+    std::string prompt;
+    for (; argument < argc; ++argument) {
+        if (!prompt.empty()) {
+            prompt += ' ';
         }
-        auto directory = microcodex::conversationDirectory();
-        if (!directory) return std::unexpected(directory.error());
-        std::filesystem::path filename(id);
-        if (filename.extension() != ".jsonl") filename += ".jsonl";
-        const std::filesystem::path path = *directory / filename;
-        std::error_code error;
-        if (!std::filesystem::is_regular_file(path, error)) {
-            return std::unexpected("Conversation '" + std::string(id) + "' was not found");
+        prompt += argv[argument];
+    }
+    return AgentRequest{
+        .model = std::move(model),
+        .model_explicit = model_explicit,
+        .prompt = prompt.empty() ? std::nullopt : std::optional<std::string>(std::move(prompt)),
+        .resume_id = std::move(resume_id),
+        .reasoning_effort = std::move(reasoning_effort),
+        .reasoning_effort_explicit = reasoning_effort_explicit,
+    };
+}
+
+std::expected<std::filesystem::path, std::string> conversationPath(const std::string_view id) {
+    if (id.empty() || id.find('/') != std::string_view::npos || id == "." || id == "..") {
+        return std::unexpected("Invalid conversation ID");
+    }
+    auto directory = microcodex::conversationDirectory();
+    if (!directory) return std::unexpected(directory.error());
+    std::filesystem::path filename(id);
+    if (filename.extension() != ".jsonl") filename += ".jsonl";
+    const std::filesystem::path path = *directory / filename;
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(path, error)) {
+        return std::unexpected("Conversation '" + std::string(id) + "' was not found");
+    }
+    return path;
+}
+
+int listSavedConversations() {
+    auto directory = microcodex::conversationDirectory();
+    if (!directory) {
+        std::cerr << directory.error() << '\n';
+        return 1;
+    }
+    auto conversations = microcodex::listConversations(*directory);
+    if (!conversations) {
+        std::cerr << conversations.error() << '\n';
+        return 1;
+    }
+    for (const microcodex::ConversationSummary& conversation : *conversations) {
+        std::cout << conversation.metadata.id << '\t' << conversation.metadata.created_at << '\t'
+                  << conversation.metadata.model << '\t' << conversation.metadata.working_directory << '\n';
+    }
+    return 0;
+}
+
+std::expected<void, std::string> printSavedTurn(const microcodex::SavedTurn& turn) {
+    for (const std::string& item : turn.items) {
+        auto message = microcodex::responseMessage(item);
+        if (!message) return std::unexpected(message.error());
+        if (*message) {
+            std::cout << (*message)->role << ": " << (*message)->text << '\n';
+            continue;
         }
-        return path;
+        auto call = microcodex::responseToolCall(item);
+        if (!call) return std::unexpected(call.error());
+        if (*call) {
+            std::cout << "tool " << (*call)->name << ": " << (*call)->arguments << '\n';
+            continue;
+        }
+        auto output = microcodex::responseToolOutput(item);
+        if (!output) return std::unexpected(output.error());
+        if (*output) {
+            std::cout << "tool output " << (*output)->call_id << ": " << (*output)->output << '\n';
+        }
+    }
+    return {};
+}
+
+int showSavedConversation(const std::string_view id) {
+    auto path = conversationPath(id);
+    if (!path) {
+        std::cerr << path.error() << '\n';
+        return 1;
+    }
+    auto file = microcodex::ConversationFile::openReadOnly(*path);
+    if (!file) {
+        std::cerr << file.error() << '\n';
+        return 1;
+    }
+    auto resumed = file->resume();
+    if (!resumed) {
+        std::cerr << resumed.error() << '\n';
+        return 1;
+    }
+    auto turns = file->readTurnsBefore(file->turnCount(), std::numeric_limits<std::size_t>::max());
+    if (!turns) {
+        std::cerr << turns.error() << '\n';
+        return 1;
+    }
+    for (const microcodex::SavedTurn& turn : *turns) {
+        auto printed = printSavedTurn(turn);
+        if (!printed) {
+            std::cerr << printed.error() << '\n';
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int completeLogin(const std::expected<microcodex::OAuthCredentials, std::string>& credentials) {
+    if (!credentials) {
+        std::cerr << "Login failed: " << credentials.error() << '\n';
+        return 1;
+    }
+    auto saved = microcodex::saveOAuthCredentials(*credentials);
+    if (!saved) {
+        std::cerr << "Login succeeded, but credentials could not be saved: " << saved.error() << '\n';
+        return 1;
+    }
+    std::cout << "Logged in.\n";
+    return 0;
+}
+
+int login() {
+    auto login = microcodex::OAuthLogin::start();
+    if (!login) {
+        std::cerr << "Login failed: " << login.error() << '\n';
+        return 1;
     }
 
-    int listSavedConversations() {
-        auto directory = microcodex::conversationDirectory();
-        if (!directory) {
-            std::cerr << directory.error() << '\n';
-            return 1;
-        }
-        auto conversations = microcodex::listConversations(*directory);
-        if (!conversations) {
-            std::cerr << conversations.error() << '\n';
-            return 1;
-        }
-        for (const microcodex::ConversationSummary &conversation : *conversations) {
-            std::cout << conversation.metadata.id << '\t'
-                      << conversation.metadata.created_at << '\t'
-                      << conversation.metadata.model << '\t'
-                      << conversation.metadata.working_directory << '\n';
-        }
-        return 0;
+    std::cout << "Open this URL to log in:\n"
+              << login->authorizationUrl() << "\n\n"
+              << "Waiting for the browser callback on port " << login->callbackPort() << "...\n"
+              << "On a remote machine? Run 'microcodex login --device-auth' instead.\n";
+    return completeLogin(login->finish(std::chrono::minutes(5)));
+}
+
+int deviceLogin() {
+    auto login = microcodex::startOAuthDeviceLogin();
+    if (!login) {
+        std::cerr << "Login failed: " << login.error() << '\n';
+        return 1;
     }
 
-    std::expected<void, std::string> printSavedTurn(const microcodex::SavedTurn &turn) {
-        for (const std::string &item : turn.items) {
-            auto message = microcodex::responseMessage(item);
-            if (!message) return std::unexpected(message.error());
-            if (*message) {
-                std::cout << (*message)->role << ": " << (*message)->text << '\n';
-                continue;
-            }
-            auto call = microcodex::responseToolCall(item);
-            if (!call) return std::unexpected(call.error());
-            if (*call) {
-                std::cout << "tool " << (*call)->name << ": " << (*call)->arguments << '\n';
-                continue;
-            }
-            auto output = microcodex::responseToolOutput(item);
-            if (!output) return std::unexpected(output.error());
-            if (*output) {
-                std::cout << "tool output " << (*output)->call_id << ": "
-                          << (*output)->output << '\n';
-            }
-        }
-        return {};
+    std::cout << "Open this URL in your browser:\n"
+              << login->verification_url << "\n\n"
+              << "Enter this one-time code (expires in 15 minutes):\n"
+              << login->user_code << "\n\n"
+              << "Continue only if you started this login in MicroCodex.\n"
+              << "Waiting for authorization...\n";
+    return completeLogin(microcodex::finishOAuthDeviceLogin(*login));
+}
+
+int logout() {
+    auto logged_out = microcodex::logoutOAuth();
+    if (!logged_out) {
+        std::cerr << "Logout failed: " << logged_out.error() << '\n';
+        return 1;
     }
+    std::cout << (*logged_out ? "Logged out.\n" : "Already logged out.\n");
+    return 0;
+}
 
-    int showSavedConversation(const std::string_view id) {
-        auto path = conversationPath(id);
-        if (!path) {
-            std::cerr << path.error() << '\n';
-            return 1;
-        }
-        auto file = microcodex::ConversationFile::openReadOnly(*path);
-        if (!file) {
-            std::cerr << file.error() << '\n';
-            return 1;
-        }
-        auto resumed = file->resume();
-        if (!resumed) {
-            std::cerr << resumed.error() << '\n';
-            return 1;
-        }
-        auto turns = file->readTurnsBefore(file->turnCount(),
-                                           std::numeric_limits<std::size_t>::max());
-        if (!turns) {
-            std::cerr << turns.error() << '\n';
-            return 1;
-        }
-        for (const microcodex::SavedTurn &turn : *turns) {
-            auto printed = printSavedTurn(turn);
-            if (!printed) {
-                std::cerr << printed.error() << '\n';
-                return 1;
-            }
-        }
-        return 0;
-    }
-
-    int completeLogin(const std::expected<microcodex::OAuthCredentials, std::string> &credentials) {
-        if (!credentials) {
-            std::cerr << "Login failed: " << credentials.error() << '\n';
-            return 1;
-        }
-        auto saved = microcodex::saveOAuthCredentials(*credentials);
-        if (!saved) {
-            std::cerr << "Login succeeded, but credentials could not be saved: " << saved.error() << '\n';
-            return 1;
-        }
-        std::cout << "Logged in.\n";
-        return 0;
-    }
-
-    int login() {
-        auto login = microcodex::OAuthLogin::start();
-        if (!login) {
-            std::cerr << "Login failed: " << login.error() << '\n';
-            return 1;
-        }
-
-        std::cout << "Open this URL to log in:\n" << login->authorizationUrl() << "\n\n"
-                  << "Waiting for the browser callback on port " << login->callbackPort() << "...\n"
-                  << "On a remote machine? Run 'microcodex login --device-auth' instead.\n";
-        return completeLogin(login->finish(std::chrono::minutes(5)));
-    }
-
-    int deviceLogin() {
-        auto login = microcodex::startOAuthDeviceLogin();
-        if (!login) {
-            std::cerr << "Login failed: " << login.error() << '\n';
-            return 1;
-        }
-
-        std::cout << "Open this URL in your browser:\n" << login->verification_url << "\n\n"
-                  << "Enter this one-time code (expires in 15 minutes):\n"
-                  << login->user_code << "\n\n"
-                  << "Continue only if you started this login in MicroCodex.\n"
-                  << "Waiting for authorization...\n";
-        return completeLogin(microcodex::finishOAuthDeviceLogin(*login));
-    }
-
-    int logout() {
-        auto logged_out = microcodex::logoutOAuth();
-        if (!logged_out) {
-            std::cerr << "Logout failed: " << logged_out.error() << '\n';
-            return 1;
-        }
-        std::cout << (*logged_out ? "Logged out.\n" : "Already logged out.\n");
-        return 0;
-    }
-
-    int runPrompt(microcodex::CodexApiConfig config, const std::string_view prompt) {
-        bool received_text = false;
-        microcodex::CodexEventEmitter events([&received_text](const microcodex::CodexEvent &event) {
-            switch (event.type) {
+int runPrompt(microcodex::CodexApiConfig config, const std::string_view prompt) {
+    bool received_text = false;
+    microcodex::CodexEventEmitter events([&received_text](const microcodex::CodexEvent& event) {
+        switch (event.type) {
             case microcodex::CodexEventType::TextDelta:
                 std::cout << event.text << std::flush;
                 received_text = true;
@@ -307,90 +306,92 @@ namespace {
                 std::cerr << "\n[tool " << event.tool_name << "] " << event.text << '\n';
                 break;
             case microcodex::CodexEventType::ToolFinished:
-                std::cerr << "[tool " << event.tool_name << (event.succeeded ? " completed]" : " failed]")
-                          << ' ' << event.text << '\n';
+                std::cerr << "[tool " << event.tool_name << (event.succeeded ? " completed]" : " failed]") << ' '
+                          << event.text << '\n';
                 break;
-            default:
-                break;
-            }
-        });
-
-        microcodex::CodexApi agent(std::move(config), events);
-        auto response = agent.sendUserMessage(prompt);
-        if (!response) {
-            std::cerr << "Agent failed: " << response.error() << '\n';
-            return 1;
+            default: break;
         }
-        if (!received_text && !response->text.empty()) {
-            std::cout << response->text;
-        }
-        if (received_text || !response->text.empty()) {
-            std::cout << '\n';
-        }
-        return 0;
+    });
+
+    microcodex::CodexApi agent(std::move(config), events);
+    auto response = agent.sendUserMessage(prompt);
+    if (!response) {
+        std::cerr << "Agent failed: " << response.error() << '\n';
+        return 1;
     }
-
-    std::expected<void, std::string> applySizeEnvironment(const char *name, std::size_t &destination) {
-        const char *text = std::getenv(name);
-        if (text == nullptr || text[0] == '\0') return {};
-        std::size_t value = 0;
-        const char *end = text;
-        while (*end != '\0') ++end;
-        const auto [parsed_end, error] = std::from_chars(text, end, value);
-        if (error != std::errc{} || parsed_end != end) {
-            return std::unexpected(std::string(name) + " must be an unsigned integer");
-        }
-        destination = value;
-        return {};
+    if (!received_text && !response->text.empty()) {
+        std::cout << response->text;
     }
-
-    std::expected<void, std::string> applyToolTimeoutEnvironment(microcodex::CodexApiConfig &config) {
-        auto parsed = applySizeEnvironment("MICROCODEX_TOOL_EXECUTION_TIMEOUT_SECONDS",
-                                           config.tool_execution_timeout_seconds);
-        if (!parsed) return parsed;
-        // Zero disables the timeout. Anything above a year is almost certainly
-        // a mistake, and it would overflow std::chrono::seconds' signed
-        // representation, silently disabling the timeout instead of erroring.
-        constexpr std::size_t one_year_seconds = 365 * 24 * 60 * 60;
-        if (config.tool_execution_timeout_seconds > one_year_seconds) {
-            return std::unexpected("MICROCODEX_TOOL_EXECUTION_TIMEOUT_SECONDS must not exceed 31536000 (one year); use 0 to disable the timeout");
-        }
-        return {};
+    if (received_text || !response->text.empty()) {
+        std::cout << '\n';
     }
+    return 0;
+}
 
-    std::expected<void, std::string> applyConversationEnvironment(microcodex::CodexApiConfig &config) {
-        auto compact_at = applySizeEnvironment("MICROCODEX_COMPACT_AT_TOKENS",
-                                               config.compaction.compact_at_tokens);
-        if (!compact_at) return compact_at;
-        auto retained = applySizeEnvironment("MICROCODEX_RETAINED_CONTEXT_TOKENS",
-                                             config.compaction.retained_context_tokens);
-        if (!retained) return retained;
-        return applyToolTimeoutEnvironment(config);
+std::expected<void, std::string> applySizeEnvironment(const char* name, std::size_t& destination) {
+    const char* text = std::getenv(name);
+    if (text == nullptr || text[0] == '\0') return {};
+    std::size_t value = 0;
+    const char* end = text;
+    while (*end != '\0') ++end;
+    const auto [parsed_end, error] = std::from_chars(text, end, value);
+    if (error != std::errc{} || parsed_end != end) {
+        return std::unexpected(std::string(name) + " must be an unsigned integer");
     }
+    destination = value;
+    return {};
+}
 
-    std::expected<void, std::string> applyEffortEnvironment(microcodex::CodexApiConfig &config, const bool effort_explicit) {
-        // An explicit --effort flag wins over the environment.
-        if (effort_explicit) return {};
-        const char *value = std::getenv("MICROCODEX_EFFORT");
-        if (value == nullptr) return {};
-        auto resolved = resolveReasoningEffort(value, "MICROCODEX_EFFORT");
-        if (!resolved) return std::unexpected(resolved.error());
-        config.reasoning_effort = std::move(*resolved);
-        return {};
+std::expected<void, std::string> applyToolTimeoutEnvironment(microcodex::CodexApiConfig& config) {
+    auto parsed =
+        applySizeEnvironment("MICROCODEX_TOOL_EXECUTION_TIMEOUT_SECONDS", config.tool_execution_timeout_seconds);
+    if (!parsed) return parsed;
+    // Zero disables the timeout. Anything above a year is almost certainly
+    // a mistake, and it would overflow std::chrono::seconds' signed
+    // representation, silently disabling the timeout instead of erroring.
+    constexpr std::size_t one_year_seconds = 365 * 24 * 60 * 60;
+    if (config.tool_execution_timeout_seconds > one_year_seconds) {
+        return std::unexpected(
+            "MICROCODEX_TOOL_EXECUTION_TIMEOUT_SECONDS must not exceed 31536000 (one year); use 0 to disable the "
+            "timeout");
     }
+    return {};
+}
 
-    std::expected<void, std::string> applyModelContextLimits(microcodex::CodexApiConfig &config) {
-        auto models = microcodex::fetchModelContextLimits(config.endpoint, config.access_token, config.account_id);
-        if (!models) return std::unexpected(models.error());
-        const microcodex::ModelContextLimits *model = microcodex::findModelContextLimits(*models, config.model);
-        if (model == nullptr) return std::unexpected("Models API did not return metadata for '" + config.model + "'");
-        config.compaction = microcodex::compactionConfigForModel(*model, config.compaction.retained_context_tokens, config.compaction.maximum_summary_bytes);
-        return {};
-    }
+std::expected<void, std::string> applyConversationEnvironment(microcodex::CodexApiConfig& config) {
+    auto compact_at = applySizeEnvironment("MICROCODEX_COMPACT_AT_TOKENS", config.compaction.compact_at_tokens);
+    if (!compact_at) return compact_at;
+    auto retained =
+        applySizeEnvironment("MICROCODEX_RETAINED_CONTEXT_TOKENS", config.compaction.retained_context_tokens);
+    if (!retained) return retained;
+    return applyToolTimeoutEnvironment(config);
+}
 
-} // namespace
+std::expected<void, std::string> applyEffortEnvironment(microcodex::CodexApiConfig& config,
+                                                        const bool effort_explicit) {
+    // An explicit --effort flag wins over the environment.
+    if (effort_explicit) return {};
+    const char* value = std::getenv("MICROCODEX_EFFORT");
+    if (value == nullptr) return {};
+    auto resolved = resolveReasoningEffort(value, "MICROCODEX_EFFORT");
+    if (!resolved) return std::unexpected(resolved.error());
+    config.reasoning_effort = std::move(*resolved);
+    return {};
+}
 
-int main(const int argc, char *argv[]) {
+std::expected<void, std::string> applyModelContextLimits(microcodex::CodexApiConfig& config) {
+    auto models = microcodex::fetchModelContextLimits(config.endpoint, config.access_token, config.account_id);
+    if (!models) return std::unexpected(models.error());
+    const microcodex::ModelContextLimits* model = microcodex::findModelContextLimits(*models, config.model);
+    if (model == nullptr) return std::unexpected("Models API did not return metadata for '" + config.model + "'");
+    config.compaction = microcodex::compactionConfigForModel(*model, config.compaction.retained_context_tokens,
+                                                             config.compaction.maximum_summary_bytes);
+    return {};
+}
+
+}  // namespace
+
+int main(const int argc, char* argv[]) {
     const std::string_view executable = argc > 0 ? argv[0] : "microcodex";
     if (argc > 1 && (std::string_view(argv[1]) == "--help" || std::string_view(argv[1]) == "-h")) {
         printUsage(executable);
@@ -440,8 +441,7 @@ int main(const int argc, char *argv[]) {
         std::error_code error;
         std::filesystem::current_path(metadata->working_directory, error);
         if (error) {
-            std::cerr << "Could not restore conversation working directory: "
-                      << error.message() << '\n';
+            std::cerr << "Could not restore conversation working directory: " << error.message() << '\n';
             return 1;
         }
         resume_path = std::move(*path);
@@ -470,8 +470,7 @@ int main(const int argc, char *argv[]) {
     // Keep transport selection at the executable boundary so black-box tests
     // can exercise the real CLI against a deterministic loopback server. The
     // default remains the production Codex endpoint.
-    if (const char *endpoint = std::getenv("MICROCODEX_API_ENDPOINT");
-        endpoint != nullptr && endpoint[0] != '\0') {
+    if (const char* endpoint = std::getenv("MICROCODEX_API_ENDPOINT"); endpoint != nullptr && endpoint[0] != '\0') {
         config.endpoint = endpoint;
     }
     auto model_context = applyModelContextLimits(config);

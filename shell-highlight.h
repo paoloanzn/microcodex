@@ -3,16 +3,16 @@
 
 #pragma once
 
-#include "styled-text.h"
-
 #include <string_view>
 #include <vector>
 
+#include "styled-text.h"
+
 namespace microcodex::ui {
 
-    // Highlight shell source without changing its contents. This is a lexer,
-    // not a shell parser; unfamiliar or incomplete syntax remains visible as
-    // ordinary text.
-    std::vector<StyledSpan> highlightShell(std::string_view source);
+// Highlight shell source without changing its contents. This is a lexer,
+// not a shell parser; unfamiliar or incomplete syntax remains visible as
+// ordinary text.
+std::vector<StyledSpan> highlightShell(std::string_view source);
 
-} // namespace microcodex::ui
+}  // namespace microcodex::ui

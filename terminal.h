@@ -5,10 +5,10 @@
 
 namespace microcodex::terminal {
 
-    constexpr unsigned char paste_start_event = 4;
-    constexpr unsigned char paste_end_event = 5;
+constexpr unsigned char paste_start_event = 4;
+constexpr unsigned char paste_end_event = 5;
 
-    int enableBracketedPaste();
-    void disableBracketedPaste();
+int enableBracketedPaste();
+void disableBracketedPaste();
 
-} // namespace microcodex::terminal
+}  // namespace microcodex::terminal
