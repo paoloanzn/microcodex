@@ -27,12 +27,12 @@ namespace {
 constexpr std::size_t default_effective_context_window_percent = 95;
 constexpr std::size_t default_auto_compact_percent = 90;
 constexpr std::size_t maximum_models_response_bytes = std::size_t{2} * 1024 * 1024;
-// The backend filters models by their minimum Codex client version.
-// Keep this aligned with the Codex protocol version we implement.
-// GPT-6 models (gpt-6-sol, gpt-6-luna) require client version 0.155.0;
-// gpt-6-astra requires 0.153.0. Verified against openai/codex's
-// bundled model catalog (minimal_client_version fields).
-constexpr std::string_view models_client_version = "0.155.0";
+// The backend lists only the models whose minimal_client_version is at most
+// this value, so it is the lowest version that shows every model we support.
+// gpt-6.2-sol and gpt-6.2-astra require 0.166.0; gpt-6-sol and gpt-6-luna
+// 0.155.0; gpt-6-astra, gpt-6.1-sol and gpt-6.1-terra 0.153.0. Verified
+// against openai/codex's bundled model catalog.
+constexpr std::string_view models_client_version = "0.166.0";
 
 std::expected<std::optional<std::size_t>, std::string> optionalSizeMember(const std::string_view object,
                                                                           const std::string_view name) {

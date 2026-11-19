@@ -62,10 +62,10 @@ constexpr auto reasoning_effort_values = std::to_array<std::string_view>({
 
 // Wire value for the reasoning effort. The configuration keeps the value the
 // user chose, so it can be shown back to them, and only the request carries
-// the mapped one. The Responses API calls "persistent" "disabled", and the
-// gpt-6-sol wire set tops out at "max" (docs list none/low/medium/high/xhigh/
-// max), so the higher "ultra" tier maps down to it instead of sending an
-// unsupported value.
+// the mapped one. The Responses API calls "persistent" "disabled". "ultra" is
+// not a sampling effort of its own: Codex uses it to also run sub-agents, and
+// sends the model's highest single-agent effort. MicroCodex has no sub-agents,
+// so "ultra" is an alias for "max", which every GPT-6 model supports.
 std::string_view wireReasoningEffort(const std::string_view effort) {
     if (effort == "persistent") return "disabled";
     if (effort == "ultra") return "max";

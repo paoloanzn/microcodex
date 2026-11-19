@@ -37,7 +37,7 @@ def read_request(socket)
 end
 
 def validate_models_request!(request_line, headers)
-  assert(request_line == "GET /models?client_version=0.155.0 HTTP/1.1",
+  assert(request_line == "GET /models?client_version=0.166.0 HTTP/1.1",
          "request did not GET the models endpoint")
   assert(headers["authorization"] == "Bearer test-access-token",
          "models request did not send the isolated access token")
@@ -91,7 +91,7 @@ def validate_scenario!(scenario, request_number, payload)
     validate_coding_tools!(payload)
     assert(payload.dig("reasoning", "effort") == "medium",
            "default-model request did not send the default effort")
-    assert(payload["model"] == "gpt-6-sol", "default GPT-6 model was not sent")
+    assert(payload["model"] == "gpt-6.2-sol", "default GPT-6.2 model was not sent")
     assert(input_text(payload) == "Say hello with the default model",
            "CLI prompt arguments were not joined and sent")
   when "effort"
@@ -611,6 +611,20 @@ end
 def models_response(scenario)
   test_model_context_window = scenario == "compaction-resume" ? 2 : 272_000
   JSON.generate(models: [
+    {
+      slug: "gpt-6.2-sol",
+      context_window: 500_000,
+      max_context_window: 872_000,
+      effective_context_window_percent: nil,
+      auto_compact_token_limit: nil
+    },
+    {
+      slug: "gpt-6.2-astra",
+      context_window: 272_000,
+      max_context_window: 872_000,
+      effective_context_window_percent: nil,
+      auto_compact_token_limit: nil
+    },
     {
       slug: "gpt-6-sol",
       context_window: 400_000,

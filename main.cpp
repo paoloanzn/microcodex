@@ -30,7 +30,7 @@
 
 namespace {
 
-constexpr std::string_view default_model = "gpt-6-sol";
+constexpr std::string_view default_model = "gpt-6.2-sol";
 constexpr std::string_view default_reasoning_effort = "medium";
 
 std::string effortValueList() {
