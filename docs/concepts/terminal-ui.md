@@ -1,9 +1,72 @@
 # Terminal UI
 
 `microcodex` with no prompt starts an interactive session, implemented in
-`ui.cpp` by `runInteractive()`. This page explains how the UI talks to the
-agent, how its main loop works, and how a transcript becomes terminal rows.
-The keys are listed in the [command line reference](../reference/cli.md#interactive-keys).
+`ui.cpp` by `runInteractive()`. This page explains the state-and-events model
+the UI is built on, how the UI talks to the agent, how its main loop works,
+and how a transcript becomes terminal rows. The keys are listed in the
+[command line reference](../reference/cli.md#interactive-keys).
+
+## State, events and a reducer
+
+The UI follows one simple model: **the screen is a function of a single state
+value, and that state only changes in response to events.** This is the
+pattern known as a state reducer (or event/reducer architecture).
+
+- **State**: one struct, `UiState`, holds everything the screen shows: the
+  transcript, the composer text and cursor, the status line, the scroll
+  offset, and a `dirty` flag that says the screen is out of date.
+- **Events**: there are two sources. The agent produces `CodexEvent`s (text
+  arrived, a tool started, the turn ended). The terminal produces `tb_event`s
+  (a key, a mouse wheel step, a resize).
+- **Reducers**: each kind of event has one function that takes the state and
+  a single event, and updates the state. `applyEvent(UiState&, const CodexEvent&)`
+  handles agent events. `handleEvent(UiState&, …, const tb_event&)` handles
+  terminal events.
+- **View**: `render(UiState&, …)` draws the whole screen from the state. It
+  never looks at events.
+
+```mermaid
+flowchart LR
+    agent["agent events<br/>CodexEvent"] --> apply["applyEvent()"]
+    terminal["terminal events<br/>tb_event"] --> handle["handleEvent()"]
+    apply --> state[("UiState")]
+    handle --> state
+    state --> render["render()"] --> screen["terminal screen"]
+    handle -. "commands: start a turn,<br/>interrupt, reset" .-> api["CodexApi"]
+```
+
+Streaming text shows how little each piece has to know. When a `TextDelta`
+arrives, `applyEvent()` appends its text to the last assistant entry (or
+creates one) and sets `dirty`. That is all it does. On the next pass of the
+main loop, `render()` sees `dirty` and redraws the transcript, now with the
+new text. Neither function knows about the other.
+
+This gives a short checklist for changing the UI:
+
+1. Add a field to `UiState` for whatever the screen needs to remember.
+2. Change it in the reducer for the event that should affect it, and set
+   `dirty`.
+3. Read it in `render()` or one of the functions it calls.
+
+Never draw from an event handler, and never touch `UiState` from another
+thread. Agent events reach the main thread through a queue, described below,
+so the reducers always run on the main thread.
+
+The implementation is pragmatic rather than strict, in three ways:
+
+- **The state is changed in place.** A reducer receives `UiState&` and
+  modifies it. It does not return a new copy, which would mean copying up to
+  512 KiB of transcript per keystroke.
+- **Terminal reducers can issue commands.** Enter starts a turn
+  (`startTurn()` launches the worker thread), Esc and Ctrl-C call
+  `CodexApi::interrupt()`, Ctrl-R calls `resetConversation()`, and Ctrl-L asks
+  termbox to repaint everything. `applyEvent()` has no such side effects: agent
+  events only ever change `UiState`.
+- **`render()` writes back derived values.** It clamps `scroll` to the
+  transcript length, fills each assistant entry's Markdown cache, records
+  which row holds the "Working" animation, and clears `dirty`. These are
+  caches and layout results, not new information, so the state still decides
+  what is shown.
 
 ## Two threads and a queue
 
