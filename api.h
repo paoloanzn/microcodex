@@ -24,14 +24,21 @@
 
 namespace microcodex {
 
+// The user-facing reasoning effort values, in the order they are listed.
+std::span<const std::string_view> reasoningEffortValues() noexcept;
+
+// Checks a user-facing effort value. `source` names where the value came from
+// ("--effort", "MICROCODEX_EFFORT" or "/effort") in the error message.
+std::expected<void, std::string> validateReasoningEffort(std::string_view effort, std::string_view source);
+
 struct CodexApiConfig {
     std::string access_token;
     std::string account_id;
     std::string model;
     std::string instructions;
-    // Thinking effort sent as "reasoning": {"effort": ...}; "persistent"
-    // is normalized to "disabled" on the wire, matching the official
-    // Codex client's resolve_reasoning_effort.
+    // User-facing thinking effort, one of reasoningEffortValues(). It is
+    // sent as "reasoning": {"effort": ...}, except that "persistent" is sent
+    // as "disabled" and "ultra" as "max".
     std::string reasoning_effort = "medium";
     std::string endpoint = "https://chatgpt.com/backend-api/codex/responses";
     long idle_timeout_seconds = 300;
@@ -57,6 +64,19 @@ struct CodexApiConfig {
     bool persist_conversation = true;
     std::optional<std::filesystem::path> resume_conversation;
     std::vector<std::shared_ptr<const ToolBase>> tools;
+};
+
+// Settings and context usage reported by CodexApi::status().
+struct CodexApiStatus {
+    std::string model;
+    std::string reasoning_effort;
+    std::size_t saved_turns = 0;
+    // The larger of the last reported input token count and the byte-based
+    // estimate, the same size compaction compares against its threshold.
+    std::size_t context_tokens = 0;
+    std::size_t context_limit_tokens = 0;
+    // Zero when automatic compaction is off.
+    std::size_t compact_at_tokens = 0;
 };
 
 struct CodexApiResponse {
@@ -100,6 +120,11 @@ public:
     // Reset is rejected while a turn is active so conversation history is
     // always owned and modified by a single thread.
     std::expected<void, std::string> resetConversation();
+
+    // Both are rejected while a turn is running, because the worker thread
+    // reads the configuration and the context during a turn.
+    std::expected<CodexApiStatus, std::string> status() const;
+    std::expected<void, std::string> setReasoningEffort(std::string effort);
 
     // Prevents future turns and interrupts one that is currently active.
     // CodexApi owns no worker thread, so the caller remains responsible for

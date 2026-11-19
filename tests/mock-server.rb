@@ -147,6 +147,26 @@ def validate_scenario!(scenario, request_number, payload)
     validate_coding_tools!(payload)
     assert(input_text(payload) == "alpha t1op\nmiddle2D\nbottom3",
            "composer keybindings did not preserve the edited multiline prompt")
+  when "slash-commands"
+    validate_coding_tools!(payload)
+    input = payload.fetch("input")
+    case request_number
+    when 0
+      assert(payload.dig("reasoning", "effort") == "high",
+             "/effort picker did not change the reasoning effort to high")
+      assert(input.length == 1 && input_text(payload) == "/etc/hosts is fine",
+             "slash commands were sent to the model, or an unknown /word was not sent as a message")
+    when 1
+      assert(payload.dig("reasoning", "effort") == "high",
+             "second turn did not keep the selected reasoning effort")
+      assert(input.length == 3 && input.last.dig("content", 0, "text") == "second",
+             "/new reset the conversation while a turn was running")
+    else
+      assert(payload.dig("reasoning", "effort") == "low",
+             "/effort low did not change the reasoning effort")
+      assert(input.length == 1 && input_text(payload) == "third",
+             "/new did not start a new conversation")
+    end
   when "tool-write"
     validate_coding_tools!(payload)
     if request_number.zero?
@@ -509,6 +529,7 @@ def response_for(scenario, request_number)
   when "invisible-paste-edited"
     [200, "OK", "text/event-stream", message_response("Edited paste received")]
   when "keybindings" then [200, "OK", "text/event-stream", message_response("Keys received")]
+  when "slash-commands" then [200, "OK", "text/event-stream", message_response("Command test reply")]
   when "http-error"
     [429, "Too Many Requests", "application/json",
      JSON.generate(error: {message: "rate limited"})]
@@ -644,6 +665,8 @@ expected_requests = if scenario == "context-error-retry"
                       3
                     elsif %w[stream-drop stream-error remote-503 remote-continue].include?(scenario)
                       1
+                    elsif scenario == "slash-commands"
+                      3
                     elsif scenario == "tool-round-limit"
                       TOOL_ROUND_LIMIT + 2
                     elsif %w[tool-write tool-edit tool-shell-env tool-bash-denied tool-timeout tool-timeout-batch compaction-resume incomplete-output interrupt-output interrupt-tool].include?(scenario)
@@ -707,6 +730,9 @@ while request_number < expected_requests
         )
         socket.close
       else
+        # Keep the first slash-command turn running long enough for the UI
+        # test to try a command that is unavailable during a turn.
+        sleep 1 if scenario == "slash-commands" && request_number.zero?
         send_response(socket, *response_for(scenario, request_number))
         if scenario == "interrupt-tool" && request_number.zero?
           sleep 0.1

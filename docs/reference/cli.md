@@ -48,8 +48,9 @@ The options must come before the prompt:
 | `--model MODEL` | `gpt-6-sol` | Any model the account can use. A value that starts with `--` is rejected. |
 | `--effort EFFORT` | `medium` | One of the values below. Overrides `MICROCODEX_EFFORT`. |
 
-The effort is sent as the request's `reasoning.effort`. Two values are
-renamed on the way:
+The effort is sent as the request's `reasoning.effort`. In an interactive
+session, `/effort` changes it for the following turns. Two values are renamed
+on the way:
 
 | Value | Sent as |
 |---|---|
@@ -184,7 +185,7 @@ The footer shows the most common keys. All of them:
 
 | Key | Action |
 |---|---|
-| Enter | Send the message. |
+| Enter | Send the message, or run a [slash command](#slash-commands). |
 | Ctrl-J | Insert a newline. |
 | Esc, Ctrl-C | Interrupt the running turn, or clear the composer when no turn is running. |
 | Ctrl-D | Quit when no turn is running and the composer is empty; otherwise delete the character under the cursor. |
@@ -204,3 +205,38 @@ The footer shows the most common keys. All of them:
 
 Large pastes appear as a `[Pasted Content N chars]` label; see
 [terminal UI](../concepts/terminal-ui.md#input).
+
+## Slash commands
+
+Typing `/` as the first character of the composer opens a menu of commands
+below it, and further letters filter it by name. While the menu is open, Up
+and Down select a command, Tab completes its name, and Enter runs the selected
+command, so `/st` followed by Enter runs `/status`.
+
+| Command | During a turn | Action |
+|---|---|---|
+| `/effort` | refused | Open a picker of the effort values, with the current one selected. |
+| `/effort LEVEL` | refused | Set the effort for the following turns. `LEVEL` is one of the [effort values](#prompt-and-interactive-session). |
+| `/new` | refused | Start a new conversation, like Ctrl-R. |
+| `/status` | refused | Show the model, the effort, the number of saved turns and the context size. |
+| `/quit` | allowed | Quit, like Ctrl-Q. |
+
+The footer shows the current model and effort. A command never reaches the
+model. Text that starts with `/` but does not name a command, such as
+`/etc/hosts is wrong`, is sent as a normal message. A command that is refused
+or given unexpected arguments shows an error:
+
+```text
+✗ '/new' is not available while a turn is running
+✗ '/new' takes no arguments
+✗ /effort: unsupported reasoning effort 'turbo' (expected one of: none, minimal, low, medium, high, xhigh, max, ultra, persistent)
+```
+
+`/status` prints, for example:
+
+```text
+• Model: gpt-6-sol
+  Reasoning effort: medium
+  Saved turns: 0
+  Context: 0 of 258,400 tokens, compacts at 244,800
+```

@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <algorithm>
-#include <array>
 #include <charconv>
 #include <chrono>
 #include <cstddef>
@@ -26,6 +25,7 @@
 #include "model-catalog.h"
 #include "oauth.h"
 #include "response-item.h"
+#include "slash-command.h"
 #include "ui.h"
 
 namespace {
@@ -33,56 +33,13 @@ namespace {
 constexpr std::string_view default_model = "gpt-6-sol";
 constexpr std::string_view default_reasoning_effort = "medium";
 
-// Accepted effort values mirror the official Codex client's ReasoningEffort
-// set (openai/codex codex-rs/protocol/src/openai_models.rs). The value is
-// sent as-is in the request's "reasoning": {"effort": ...} field, except
-// "persistent", which the Responses API calls "disabled" (the official
-// client keeps "persistent" in local settings and sends "disabled"), and
-// "ultra", which maps to the gpt-6-sol wire top "max".
-constexpr auto accepted_effort_values = std::to_array<std::string_view>({
-    "none",
-    "minimal",
-    "low",
-    "medium",
-    "high",
-    "xhigh",
-    "max",
-    "ultra",
-    "persistent",
-});
-
 std::string effortValueList() {
     std::string list;
-    for (const std::string_view value : accepted_effort_values) {
+    for (const std::string_view value : microcodex::reasoningEffortValues()) {
         if (!list.empty()) list += ", ";
         list += value;
     }
     return list;
-}
-
-// Validates a user-facing effort value and returns the value sent on the
-// wire. `source` names where the value came from ("--effort" or
-// "MICROCODEX_EFFORT") for error messages.
-std::expected<std::string, std::string> resolveReasoningEffort(const std::string_view effort,
-                                                               const std::string_view source) {
-    if (effort.empty()) {
-        return std::unexpected(std::string(source) +
-                               " requires an effort value (expected one of: " + effortValueList() + ")");
-    }
-    if (effort == "persistent") {
-        return "disabled";
-    }
-    // The gpt-6-sol wire set tops out at "max" (docs list
-    // none/low/medium/high/xhigh/max), so the higher "ultra" tier maps
-    // down to it instead of sending an unsupported value.
-    if (effort == "ultra") {
-        return "max";
-    }
-    for (const std::string_view accepted : accepted_effort_values) {
-        if (effort == accepted) return std::string(effort);
-    }
-    return std::unexpected(std::string(source) + ": unsupported reasoning effort '" + std::string(effort) +
-                           "' (expected one of: " + effortValueList() + ")");
 }
 
 void printUsage(const std::string_view executable) {
@@ -141,9 +98,9 @@ std::expected<AgentOptions, std::string> parseAgentOptions(const std::span<char*
                 return std::unexpected("--effort requires an effort value (expected one of: " + effortValueList() +
                                        ")");
             }
-            auto resolved = resolveReasoningEffort(arguments[argument], "--effort");
-            if (!resolved) return std::unexpected(resolved.error());
-            options.reasoning_effort = std::move(*resolved);
+            auto valid = microcodex::validateReasoningEffort(arguments[argument], "--effort");
+            if (!valid) return std::unexpected(valid.error());
+            options.reasoning_effort = arguments[argument];
             ++argument;
             options.reasoning_effort_explicit = true;
         } else {
@@ -406,9 +363,9 @@ std::expected<void, std::string> applyEffortEnvironment(microcodex::CodexApiConf
     if (effort_explicit) return {};
     const char* value = std::getenv("MICROCODEX_EFFORT");
     if (value == nullptr) return {};
-    auto resolved = resolveReasoningEffort(value, "MICROCODEX_EFFORT");
-    if (!resolved) return std::unexpected(resolved.error());
-    config.reasoning_effort = std::move(*resolved);
+    auto valid = microcodex::validateReasoningEffort(value, "MICROCODEX_EFFORT");
+    if (!valid) return std::unexpected(valid.error());
+    config.reasoning_effort = value;
     return {};
 }
 
@@ -534,7 +491,12 @@ int runAgent(const std::span<char* const> arguments, const std::string_view exec
         return runPrompt(std::move(*config), *prompt);
     }
 
-    auto result = microcodex::runInteractive(std::move(*config));
+    auto commands = microcodex::makeBuiltinSlashCommands();
+    if (!commands) {
+        std::cerr << commands.error() << '\n';
+        return 1;
+    }
+    auto result = microcodex::runInteractive(std::move(*config), *commands);
     if (!result) {
         std::cerr << result.error() << '\n';
         return 1;

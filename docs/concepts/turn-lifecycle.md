@@ -66,7 +66,7 @@ The body is built by `CodexApi::buildRequestBody()`:
 | `instructions` | The system prompt plus the skills catalog. |
 | `input` | Every item in `input_items_`, in order. |
 | `tools`, `tool_choice`, `parallel_tool_calls` | The tool definitions, `"auto"` and `true`. |
-| `reasoning` | `{"effort": …}`. The value `persistent` is sent as `disabled`. |
+| `reasoning` | `{"effort": …}`. The value `persistent` is sent as `disabled`, and `ultra` as `max`. |
 | `store` | `false`: the server keeps nothing, so every request carries the full conversation. |
 | `stream` | `true`. |
 | `include` | `["reasoning.encrypted_content"]`, so reasoning items can be replayed. |

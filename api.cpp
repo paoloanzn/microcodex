@@ -46,12 +46,30 @@ using microcodex::json::requiredJsonString;
 constexpr std::string_view interrupted_message = "Codex turn was interrupted";
 constexpr std::string_view incomplete_response_prefix = "The Codex response was incomplete: ";
 
-// Wire value for the reasoning effort. The Responses API expects
-// "disabled" where local settings keep "persistent", so normalize here at
-// the request boundary and every caller of CodexApiConfig gets the wire
-// value without having to know about the mapping.
+// Accepted effort values mirror the official Codex client's ReasoningEffort
+// set (openai/codex codex-rs/protocol/src/openai_models.rs).
+constexpr auto reasoning_effort_values = std::to_array<std::string_view>({
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra",
+    "persistent",
+});
+
+// Wire value for the reasoning effort. The configuration keeps the value the
+// user chose, so it can be shown back to them, and only the request carries
+// the mapped one. The Responses API calls "persistent" "disabled", and the
+// gpt-6-sol wire set tops out at "max" (docs list none/low/medium/high/xhigh/
+// max), so the higher "ultra" tier maps down to it instead of sending an
+// unsupported value.
 std::string_view wireReasoningEffort(const std::string_view effort) {
-    return effort == "persistent" ? "disabled" : effort;
+    if (effort == "persistent") return "disabled";
+    if (effort == "ultra") return "max";
+    return effort;
 }
 constexpr std::string_view turn_usage_limit_error = "The Codex response was incomplete: max_output_tokens";
 constexpr std::string_view tool_round_limit_error = "Codex exceeded the maximum number of tool rounds";
@@ -640,6 +658,22 @@ Result finishedToolTaskResult(std::future<Result>& future, const microcodex::Cod
 
 namespace microcodex {
 
+std::span<const std::string_view> reasoningEffortValues() noexcept { return reasoning_effort_values; }
+
+std::expected<void, std::string> validateReasoningEffort(const std::string_view effort, const std::string_view source) {
+    std::string list;
+    for (const std::string_view value : reasoning_effort_values) {
+        if (value == effort) return {};
+        if (!list.empty()) list += ", ";
+        list += value;
+    }
+    if (effort.empty()) {
+        return std::unexpected(std::string(source) + " requires an effort value (expected one of: " + list + ")");
+    }
+    return std::unexpected(std::string(source) + ": unsupported reasoning effort '" + std::string(effort) +
+                           "' (expected one of: " + list + ")");
+}
+
 CodexApi::CodexApi(CodexApiConfig config)
     : config_(std::move(config)),
       compactor_(config_.compaction),
@@ -887,6 +921,32 @@ void CodexApi::shutdown() noexcept {
     if (active_turn_stop_) {
         active_turn_stop_->request_stop();
     }
+}
+
+std::expected<CodexApiStatus, std::string> CodexApi::status() const {
+    const std::lock_guard lock(turn_mutex_);
+    if (turn_running_) {
+        return std::unexpected("Cannot read the agent status while a turn is running");
+    }
+    return CodexApiStatus{
+        .model = config_.model,
+        .reasoning_effort = config_.reasoning_effort,
+        .saved_turns = conversation_file_ ? conversation_file_->turnCount() : 0,
+        .context_tokens = std::max(reported_input_tokens_, estimateContextTokens(input_items_)),
+        .context_limit_tokens = config_.compaction.context_limit_tokens,
+        .compact_at_tokens = config_.compaction.compact_at_tokens,
+    };
+}
+
+std::expected<void, std::string> CodexApi::setReasoningEffort(std::string effort) {
+    auto valid = validateReasoningEffort(effort, "Reasoning effort");
+    if (!valid) return valid;
+    const std::lock_guard lock(turn_mutex_);
+    if (turn_running_) {
+        return std::unexpected("Cannot change the reasoning effort while a turn is running");
+    }
+    config_.reasoning_effort = std::move(effort);
+    return {};
 }
 
 bool CodexApi::turnInProgress() const noexcept {
