@@ -34,6 +34,7 @@ flowchart TB
     end
     subgraph frontends["Front ends"]
         ui["ui.cpp<br/>interactive session"]
+        slash["slash-command.cpp<br/>commands and effects"]
         prompt["runPrompt() in main.cpp<br/>one-shot prompt"]
     end
     subgraph core["Agent core"]
@@ -61,8 +62,9 @@ flowchart TB
         render["markdown · styled-text<br/>shell-highlight · termbox"]
     end
 
-    main --> ui & prompt & agent & catalog & oauth & conversation
-    ui --> api & render
+    main --> ui & prompt & agent & catalog & oauth & conversation & slash
+    ui --> api & render & slash
+    slash --> api
     prompt --> api
     agent --> sysprompt & skills & tool & impls
     api --> events & compaction & conversation & items & tool & http
@@ -76,6 +78,7 @@ flowchart TB
 |---|---|
 | `main.cpp` | Argument parsing, the `login`, `logout`, `list` and `show` subcommands, and building a `CodexApiConfig` from flags, saved credentials, the model catalog and environment variables. |
 | `ui.cpp` | The interactive session: the composer, the transcript, key handling and drawing, built as a state reducer. See [terminal UI](terminal-ui.md#state-events-and-a-reducer). |
+| `slash-command.cpp` | The `SlashCommand` interface, the registry that parses and runs `/name arguments`, the effects commands return, and the built-in commands. See [slash commands](terminal-ui.md#slash-commands). |
 | `api.cpp`, `api.h` | `CodexApi`, the stateful conversation. It builds requests, parses the event stream, runs tools, decides when to compact, and saves turns. See [turn lifecycle](turn-lifecycle.md). |
 | `event-emitter.cpp` | `CodexEventEmitter`, the one-way channel from `CodexApi` to whoever displays the turn. |
 | `context-compaction.cpp` | `ContextCompactor`: the pure policy that decides what to summarize and builds the compacted context. See [context compaction](context-compaction.md). |
@@ -107,7 +110,9 @@ in `main.cpp`). Otherwise `runAgent()` builds a session in this order:
    context limits, and the compaction and timeout variables. A failed catalog
    request only prints a warning and keeps the built-in limits.
 5. With a prompt, run one turn and print the answer (`runPrompt()`).
-   Without one, start the interactive UI (`runInteractive()`).
+   Without one, build the slash command registry
+   (`makeBuiltinSlashCommands()`) and start the interactive UI
+   (`runInteractive()`).
 
 The one-shot path and the interactive path use the same `CodexApi`. They only
 differ in how they display events.
@@ -138,7 +143,7 @@ sequenceDiagram
 
 | Thread | Started by | Touches |
 |---|---|---|
-| Main | the process | `UiState`, the terminal, and `CodexApi` only through its public methods: `initializeConversation()` and the history readers before the first turn, then `interrupt()`, `resetConversation()` and `shutdown()`. |
+| Main | the process | `UiState`, the terminal, and `CodexApi` only through its public methods: `initializeConversation()` and the history readers before the first turn, then `interrupt()`, `resetConversation()`, `status()`, `setReasoningEffort()` and `shutdown()`. |
 | Turn worker | `startTurn()` in `ui.cpp` | All `CodexApi` conversation state, for the whole turn. In one-shot mode the main thread does this itself. |
 | Tool tasks | `CodexApi::executeToolCalls()` | A copy of the tool list and one call. Never `CodexApi` itself. |
 | Reaper | `releaseTimedOutToolTask()` in `api.cpp` | Only the abandoned future, which it waits on and drops. |

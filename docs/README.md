@@ -20,7 +20,7 @@ assumes.
 | [Conversation state](concepts/conversation-state.md) | Response items, the in-memory `input_items_` array with its turn boundaries, and how that state maps to the file on disk. |
 | [Context compaction](concepts/context-compaction.md) | When the context is summarized, which turns are kept word for word, and how the summary is saved without rewriting history. |
 | [Tools](concepts/tools.md) | `ToolBase` and the `Tool<>` adapter, parallel execution, output limits, timeouts and cancellation. |
-| [Terminal UI](concepts/terminal-ui.md) | The state-reducer model the UI is built on, the event queue between the agent and the UI, the main loop, and how transcript entries become terminal rows. |
+| [Terminal UI](concepts/terminal-ui.md) | The state-reducer model the UI is built on, the event queue between the agent and the UI, the main loop, how transcript entries become terminal rows, and how slash commands work. |
 
 ## Reference
 
@@ -28,7 +28,7 @@ Exact formats, flags and limits, for when you need the precise value.
 
 | Page | Covers |
 |---|---|
-| [Command line](reference/cli.md) | Subcommands, options, environment variables, files under `CODEX_HOME`, and interactive keys. |
+| [Command line](reference/cli.md) | Subcommands, options, environment variables, files under `CODEX_HOME`, interactive keys and slash commands. |
 | [Conversation files](reference/conversation-files.md) | The JSONL record types, their fields, the rules a file must satisfy, and how damaged files are handled. |
 | [Built-in tools](reference/built-in-tools.md) | The arguments, output and failure messages of `read`, `write`, `edit`, `glob` and `bash`. |
 

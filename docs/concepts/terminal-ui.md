@@ -3,7 +3,8 @@
 `microcodex` with no prompt starts an interactive session, implemented in
 `ui.cpp` by `runInteractive()`. This page explains the state-and-events model
 the UI is built on, how the UI talks to the agent, how its main loop works,
-and how a transcript becomes terminal rows. The keys are listed in the
+how a transcript becomes terminal rows, and how slash commands run. The keys
+and commands are listed in the
 [command line reference](../reference/cli.md#interactive-keys).
 
 ## State, events and a reducer
@@ -204,3 +205,159 @@ such as `[Pasted Content 1200 chars]`, and the real text is kept in
 `UiState::pending_pastes`. The label is edited as one unit: erasing any part
 of it removes the whole paste. When the message is sent, each label is
 replaced with its text.
+
+## Slash commands
+
+A slash command never changes the UI or the agent itself. It returns a list
+of **effects**, plain values that describe what should happen, and the UI
+carries them out in one function, `applyCommandEffect()`. This is the agent
+event path in reverse: `CodexEvent`s are data the agent hands to the UI's
+reducer, and effects are data a command hands to it. Commands are therefore
+plain functions of their input, and the code that parses, lists and draws
+commands never names a specific one.
+
+The code is split in two:
+
+- `slash-command.cpp` holds the `SlashCommand` interface, the
+  `SlashCommandRegistry`, the effect types, and the built-in commands. It does
+  not include termbox or `ui.cpp`.
+- `ui.cpp` asks the registry for matches and effects, carries the effects
+  out, and draws the menu and the picker.
+
+`main.cpp` builds the registry with `makeBuiltinSlashCommands()` and passes it
+to `runInteractive()`.
+
+### A command
+
+A command is a `SlashCommand` subclass. The registry rejects a name that is
+empty, uses characters other than lowercase letters, digits and `-`, or is
+already registered.
+
+| Method | Default | Meaning |
+|---|---|---|
+| `name()` | required | The text after `/`, such as `effort`. |
+| `description()` | required | Shown in the menu. |
+| `argumentHint()` | none | Shown after the name, such as `[level]`. A command without a hint takes no arguments. |
+| `availableDuringTurn()` | `false` | Whether the command may run while a turn is running. |
+| `run(arguments, snapshot)` | required | Returns the effects. `arguments` is the text after the name, trimmed. |
+
+`run()` reads the agent only through its `CommandSnapshot`: whether a turn is
+running and, when none is, a `CodexApiStatus` with the model, effort, saved
+turn count and context size. During a turn the agent's state belongs to the
+worker thread, so the snapshot has no status then. The status is a copy, not
+a reference into `CodexApi`.
+
+### Rules for commands
+
+`run()` is meant to be a pure function: the same arguments and snapshot always
+give the same effects, and calling it changes nothing. The types enforce part
+of this:
+
+- `run()` is `const`, and the registry holds `std::shared_ptr<const SlashCommand>`,
+  so a registered command is never modified.
+- `run()` receives no `UiState` and no `CodexApi`, only the arguments and the
+  snapshot, so it cannot reach either one.
+
+The rest is a convention that review has to check, because `const` does not
+prevent `mutable` members, global variables or I/O:
+
+- **A command owns no state.** The built-in commands have no data members.
+  State a command needs across calls, such as a toggle, belongs in `UiState`
+  or `CodexApi`: the command reads it through the snapshot and changes it by
+  returning an effect.
+- **Every change is a returned effect.** A command describes what should
+  happen and the UI decides whether and when it happens, for example never
+  while a turn is running.
+- **No I/O in `run()`.** `run()` runs on the main thread, between two frames,
+  so a slow file or network call freezes the screen. Work like that needs an
+  effect that the UI runs on the worker thread, the way it runs a turn. No
+  such effect exists yet.
+
+### Effects
+
+| Effect | What the UI does |
+|---|---|
+| `ShowNotice{text}`, `ShowError{text}` | Adds a notice or error entry to the transcript. |
+| `ResetConversation` | The same as Ctrl-R. |
+| `Quit` | The same as Ctrl-Q. |
+| `OpenPicker{title, options, selected}` | Opens a picker. Each option holds a full command line, such as `/effort high`. |
+| `UpdateApi{apply}` | Calls `apply(CodexApi&)` on the main thread, and shows the text it returns as a notice or an error. Refused while a turn is running. |
+
+A picker option runs its command line exactly as if the user had typed it, so
+a picker needs no callbacks and the command validates its argument in one
+place. `/effort` with no argument returns an `OpenPicker` whose options are
+`/effort none` to `/effort persistent`. Choosing one runs that command, which
+returns an `UpdateApi` that calls `CodexApi::setReasoningEffort()`.
+
+`UpdateApi` is the one effect that carries code. The command only builds the
+function, and nothing runs until the UI calls it:
+
+```cpp
+// In EffortCommand::run(): builds the function and returns it, without calling it.
+return {microcodex::UpdateApi{
+    [level = std::string(arguments)](microcodex::CodexApi& api) -> std::expected<std::string, std::string> {
+        auto changed = api.setReasoningEffort(level);
+        if (!changed) return std::unexpected(changed.error());
+        return "Reasoning effort set to " + level;
+    }}};
+```
+
+The function captures `level` by value, so it stays valid after `run()`
+returns. `applyCommandEffect()` refuses it while a turn is running, and
+otherwise calls `apply(api)` and shows the returned text. So `run()` stays
+pure, and the change to the agent happens later, in the UI.
+
+The cost is that a `std::function` cannot be inspected. A test can check that
+`run("high", snapshot)` returned an `UpdateApi`, but not what it will do
+without calling it on a real `CodexApi`. When that matters, add a dedicated
+effect such as `SetReasoningEffort{level}`, which is plain data. That costs
+one more variant case and one more branch in `applyCommandEffect()`.
+`UpdateApi` remains the general fallback.
+
+### Running a command
+
+```mermaid
+flowchart LR
+    enter["Enter"] --> submit["submitInput()"]
+    submit --> dispatch["registry.dispatch()"]
+    dispatch -->|"not a command"| turn["startTurn()"]
+    dispatch -->|"refused or bad arguments"| error["ShowError"]
+    dispatch -->|"allowed"| run["command.run()"]
+    run --> effects["effects"]
+    error --> effects
+    effects --> apply["applyCommandEffect()"] --> state[("UiState")]
+    apply -. "UpdateApi, ResetConversation" .-> api["CodexApi"]
+```
+
+`SlashCommandRegistry::dispatch()` reads the name up to the first whitespace.
+Text that does not name a registered command goes to `startTurn()` as a
+normal message. For a known command, the registry first checks
+`availableDuringTurn()` and whether arguments were given to a command that
+takes none, and returns an error effect if either check fails. The UI then
+clears the composer, applies the effects in order, and reads the model and
+effort back from `CodexApi::status()` for the footer.
+
+### The menu and the picker
+
+The menu adds a single field to `UiState`: `command_selection`. The matching
+commands are not stored. `render()` and the key handler both call
+`SlashCommandRegistry::completions(state.input)`, so they always agree with
+the composer. The selection returns to the first entry whenever a key changes
+the input.
+
+The open picker is `UiState::picker`. While it is set, it takes every key
+except Ctrl-Q, Ctrl-L and scrolling. Both are drawn below the composer and
+show at most 10 entries at a time, scrolling to keep the selected one
+visible. The footer shows their keys.
+
+### Adding a command
+
+1. Write a `SlashCommand` subclass in `slash-command.cpp` that returns the
+   effects it needs.
+2. Add it to `makeBuiltinSlashCommands()`. The order there is the order of the
+   menu.
+3. Add it to the [slash commands table](../reference/cli.md#slash-commands).
+
+If the command needs something no effect can express, add an effect type to
+the `CommandEffect` variant and handle it in `applyCommandEffect()`. That is
+the only case that changes `ui.cpp`.

@@ -23,6 +23,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "api.h"
@@ -32,6 +33,7 @@
 #include "markdown.h"
 #include "response-item.h"
 #include "shell-highlight.h"
+#include "slash-command.h"
 #include "styled-text.h"
 #include "terminal.h"
 #include "tool.h"
@@ -56,6 +58,7 @@ constexpr std::size_t maximum_collapsed_tool_output_rows = 5;
 constexpr int animation_frame_milliseconds = 32;
 constexpr int idle_poll_milliseconds = 250;
 constexpr int maximum_prompt_rows = 6;
+constexpr std::size_t maximum_overlay_rows = 10;
 
 // Codex uses a low-contrast surface for user messages and the composer.
 // Indexed colors preserve that look without increasing termbox's per-cell
@@ -104,6 +107,12 @@ struct UiState {
     std::string paste;
     std::string status = "Ready";
     std::string active_model;
+    std::string active_effort;
+    // The open slash-command picker. While it is set it takes the keys.
+    std::optional<microcodex::OpenPicker> picker;
+    // Selected row of the command menu. The menu's entries are not stored:
+    // they are recomputed from `input`, so they always match the composer.
+    std::size_t command_selection = 0;
     std::size_t input_cursor = 0;
     std::size_t transcript_bytes = 0;
     std::size_t scroll = 0;
@@ -327,10 +336,7 @@ void finishAssistantEntries(UiState& state, const std::string_view turn_id) {
     }
 }
 
-void addNoticeOnce(UiState& state, const EntryKind kind, const std::string_view text) {
-    if (!state.transcript.empty() && state.transcript.back().text == text) {
-        return;
-    }
+void addMessage(UiState& state, const EntryKind kind, const std::string_view text) {
     addEntry(state, {
                         .kind = kind,
                         .turn_id = {},
@@ -341,6 +347,13 @@ void addNoticeOnce(UiState& state, const EntryKind kind, const std::string_view 
                         .markdown_cache = {},
                         .edit = {},
                     });
+}
+
+void addNoticeOnce(UiState& state, const EntryKind kind, const std::string_view text) {
+    if (!state.transcript.empty() && state.transcript.back().text == text) {
+        return;
+    }
+    addMessage(state, kind, text);
 }
 
 void applyEvent(UiState& state, const microcodex::CodexEvent& event) {
@@ -1116,18 +1129,29 @@ StyledLine workingLine(const UiState& state) {
     return line;
 }
 
-StyledLine footerLine(const UiState& state, const bool turn_active) {
+// What the rows between the composer and the footer show.
+enum class Overlay : std::uint8_t {
+    None,
+    CommandMenu,
+    Picker,
+};
+
+StyledLine footerLine(const UiState& state, const bool turn_active, const Overlay overlay) {
     StyledLine line;
     if (!turn_active && state.status != "Ready") {
         appendSpan(line, "  " + state.status + "  ·  ", muted_foreground);
     } else {
         appendSpan(line, "  ", muted_foreground);
     }
-    appendSpan(line, state.active_model + "  ·  ", muted_foreground);
-    appendSpan(line,
-               turn_active ? "esc / ctrl + c interrupt   ctrl + q quit"
-                           : "enter send   ctrl + j newline   ctrl + r reset   ctrl + d quit",
-               muted_foreground | TB_DIM);
+    appendSpan(line, state.active_model + " " + state.active_effort + "  ·  ", muted_foreground);
+    std::string_view keys = turn_active ? "esc / ctrl + c interrupt   ctrl + q quit"
+                                        : "enter send   ctrl + j newline   ctrl + r reset   ctrl + d quit";
+    if (overlay == Overlay::CommandMenu) {
+        keys = "↑ / ↓ select   tab complete   enter run";
+    } else if (overlay == Overlay::Picker) {
+        keys = "↑ / ↓ select   enter choose   esc close";
+    }
+    appendSpan(line, keys, muted_foreground | TB_DIM);
     if (state.scroll != 0) {
         appendSpan(line, "   scroll " + std::to_string(state.scroll), muted_foreground | TB_DIM);
     }
@@ -1153,6 +1177,64 @@ void drawLine(const int row, const StyledLine& line, const int width) {
     }
 }
 
+// Index of the first of `rows` visible entries, chosen to keep the selected
+// entry on screen.
+std::size_t overlayWindowStart(const std::size_t selected, const std::size_t rows) {
+    return selected >= rows ? selected - rows + 1 : 0;
+}
+
+void appendOverlayRow(std::vector<StyledLine>& lines, const bool selected, const std::string_view label,
+                      const std::size_t label_width, const std::string_view description) {
+    StyledLine line;
+    appendSpan(line, selected ? "› " : "  ", selected ? TB_DEFAULT | TB_BOLD : muted_foreground);
+    std::string padded(label);
+    padded.resize(std::max(label_width, label.size()) + 3, ' ');
+    appendSpan(line, padded, selected ? TB_DEFAULT | TB_BOLD : TB_DEFAULT);
+    appendSpan(line, description, muted_foreground | TB_DIM);
+    lines.push_back(std::move(line));
+}
+
+// The open picker, or the commands matching the composer input. Rows past
+// the terminal width are cut by drawLine().
+std::vector<StyledLine> overlayLines(const UiState& state, const microcodex::SlashCommandRegistry& commands) {
+    std::vector<StyledLine> lines;
+    if (state.picker) {
+        const microcodex::OpenPicker& picker = *state.picker;
+        StyledLine title;
+        appendSpan(title, "  " + picker.title, TB_DEFAULT | TB_BOLD);
+        lines.push_back(std::move(title));
+        std::size_t label_width = 0;
+        for (const microcodex::PickerOption& option : picker.options) {
+            label_width = std::max(label_width, option.label.size());
+        }
+        const std::size_t rows = std::min(picker.options.size(), maximum_overlay_rows);
+        const std::size_t start = overlayWindowStart(picker.selected, rows);
+        for (std::size_t index = start; index < start + rows; ++index) {
+            const microcodex::PickerOption& option = picker.options[index];
+            appendOverlayRow(lines, index == picker.selected, option.label, label_width, option.description);
+        }
+        return lines;
+    }
+
+    const std::vector<const microcodex::SlashCommand*> matches = commands.completions(state.input);
+    if (matches.empty()) return lines;
+    std::vector<std::string> labels;
+    std::size_t label_width = 0;
+    for (const microcodex::SlashCommand* command : matches) {
+        std::string label = "/" + std::string(command->name());
+        if (!command->argumentHint().empty()) label += " " + std::string(command->argumentHint());
+        label_width = std::max(label_width, label.size());
+        labels.push_back(std::move(label));
+    }
+    const std::size_t selected = std::min(state.command_selection, matches.size() - 1);
+    const std::size_t rows = std::min(matches.size(), maximum_overlay_rows);
+    const std::size_t start = overlayWindowStart(selected, rows);
+    for (std::size_t index = start; index < start + rows; ++index) {
+        appendOverlayRow(lines, index == selected, labels[index], label_width, matches[index]->description());
+    }
+    return lines;
+}
+
 int renderWorkingFrame(const UiState& state) {
     if (state.working_row < 0 || state.working_row >= tb_height()) {
         return TB_OK;
@@ -1172,15 +1254,17 @@ struct ComposerLayout {
     int footer_rows = 0;
     int composer_padding = 0;
     int prompt_rows = 0;
+    int overlay_rows = 0;
     // First wrapped prompt line shown, chosen to keep the cursor visible.
     std::size_t prompt_start = 0;
 
     [[nodiscard]] int lowerRows() const {
-        return working_rows + composer_spacer_rows + composer_padding + prompt_rows + footer_rows;
+        return working_rows + composer_spacer_rows + composer_padding + prompt_rows + overlay_rows + footer_rows;
     }
 };
 
-ComposerLayout composerLayout(const WrappedText& prompt, const int height, const bool turn_active) {
+ComposerLayout composerLayout(const WrappedText& prompt, const int height, const bool turn_active,
+                              const std::size_t overlay_lines) {
     ComposerLayout layout;
     layout.working_rows = turn_active && height >= 7 ? 3 : 0;
     // Without the active-turn area, keep one terminal-background row
@@ -1201,6 +1285,9 @@ ComposerLayout composerLayout(const WrappedText& prompt, const int height, const
             layout.prompt_start = prompt.cursor_line - prompt_rows + 1;
         }
     }
+    // The overlay takes what is left, keeping one transcript row.
+    const int free_rows = std::max(0, height - layout.lowerRows() - 1);
+    layout.overlay_rows = static_cast<int>(std::min(overlay_lines, static_cast<std::size_t>(free_rows)));
     return layout;
 }
 
@@ -1244,7 +1331,7 @@ void drawPrompt(const UiState& state, const WrappedText& prompt, const ComposerL
     }
 }
 
-int render(UiState& state, const bool turn_active) {
+int render(UiState& state, const microcodex::SlashCommandRegistry& commands, const bool turn_active) {
     const int width = tb_width();
     const int height = tb_height();
     if (width <= 0 || height <= 0) {
@@ -1257,7 +1344,8 @@ int render(UiState& state, const bool turn_active) {
     }
 
     const WrappedText prompt = wrapText(state.input, width, "› ", "  ", state.input_cursor);
-    const ComposerLayout layout = composerLayout(prompt, height, turn_active);
+    const std::vector<StyledLine> overlay = overlayLines(state, commands);
+    const ComposerLayout layout = composerLayout(prompt, height, turn_active, overlay.size());
     const int body_rows = std::max(0, height - layout.lowerRows());
     drawTranscript(body_rows, state, width);
 
@@ -1276,8 +1364,19 @@ int render(UiState& state, const bool turn_active) {
     const int prompt_top = composer_top + (layout.composer_padding / 2);
     drawPrompt(state, prompt, layout, prompt_top, width);
 
+    const int overlay_top = composer_top + layout.composer_padding + layout.prompt_rows;
+    for (int overlay_row = 0; overlay_row < layout.overlay_rows; ++overlay_row) {
+        drawLine(overlay_top + overlay_row, overlay[static_cast<std::size_t>(overlay_row)], width);
+    }
+
     if (layout.footer_rows != 0) {
-        drawLine(height - 1, footerLine(state, turn_active), width);
+        Overlay shown = Overlay::None;
+        if (state.picker) {
+            shown = Overlay::Picker;
+        } else if (!overlay.empty()) {
+            shown = Overlay::CommandMenu;
+        }
+        drawLine(height - 1, footerLine(state, turn_active, shown), width);
     }
 
     const std::size_t visible_cursor_line = prompt.cursor_line - layout.prompt_start;
@@ -1289,6 +1388,24 @@ int render(UiState& state, const bool turn_active) {
         state.dirty = false;
     }
     return result;
+}
+
+// The composer text with each paste label replaced by its pasted text.
+std::string composerMessage(const UiState& state) {
+    std::string message = state.input;
+    for (const auto& [placeholder, paste] : state.pending_pastes) {
+        const std::size_t position = message.find(placeholder);
+        if (position != std::string::npos) {
+            message.replace(position, placeholder.size(), paste);
+        }
+    }
+    return message;
+}
+
+void clearComposer(UiState& state) {
+    state.input.clear();
+    state.pending_pastes.clear();
+    state.input_cursor = 0;
 }
 
 void startTurn(UiState& state, microcodex::CodexApi& api, TurnFuture& turn) {
@@ -1303,16 +1420,8 @@ void startTurn(UiState& state, microcodex::CodexApi& api, TurnFuture& turn) {
         return;
     }
 
-    std::string message = std::move(state.input);
-    for (auto& [placeholder, paste] : state.pending_pastes) {
-        const std::size_t position = message.find(placeholder);
-        if (position != std::string::npos) {
-            message.replace(position, placeholder.size(), paste);
-        }
-    }
-    state.pending_pastes.clear();
-    state.input.clear();
-    state.input_cursor = 0;
+    std::string message = composerMessage(state);
+    clearComposer(state);
     state.scroll = 0;
     addEntry(state, {
                         .kind = EntryKind::User,
@@ -1385,6 +1494,134 @@ void resetConversation(UiState& state, microcodex::CodexApi& api, const TurnFutu
         state.status = "Conversation reset";
     }
     state.dirty = true;
+}
+
+template <typename... Handlers>
+struct Overloaded : Handlers... {
+    using Handlers::operator()...;
+};
+
+// The only place slash-command effects are carried out.
+void applyCommandEffect(UiState& state, microcodex::CodexApi& api, const TurnFuture& turn,
+                        microcodex::CommandEffect effect) {
+    std::visit(Overloaded{
+                   [&state](microcodex::ShowNotice& notice) { addMessage(state, EntryKind::Notice, notice.text); },
+                   [&state](microcodex::ShowError& error) { addMessage(state, EntryKind::Error, error.text); },
+                   [&](microcodex::ResetConversation& /*reset*/) { resetConversation(state, api, turn); },
+                   [&state](microcodex::Quit& /*quit*/) { state.quitting = true; },
+                   [&state](microcodex::OpenPicker& picker) {
+                       if (picker.options.empty()) return;
+                       picker.selected = std::min(picker.selected, picker.options.size() - 1);
+                       state.picker = std::move(picker);
+                   },
+                   [&](microcodex::UpdateApi& update) {
+                       // The worker thread owns the agent during a turn.
+                       if (turn.valid()) {
+                           addMessage(state, EntryKind::Error, "The agent cannot change while a turn is running");
+                           return;
+                       }
+                       auto result = update.apply(api);
+                       addMessage(state, result ? EntryKind::Notice : EntryKind::Error,
+                                  result ? *result : result.error());
+                   },
+               },
+               effect);
+}
+
+microcodex::CommandSnapshot commandSnapshot(const microcodex::CodexApi& api, const TurnFuture& turn) {
+    microcodex::CommandSnapshot snapshot{.turn_running = turn.valid(), .agent = std::nullopt};
+    if (!snapshot.turn_running) {
+        if (auto status = api.status()) snapshot.agent = std::move(*status);
+    }
+    return snapshot;
+}
+
+// Runs `line` when it names a registered command. Returns false otherwise,
+// so the caller can send it as a message.
+bool runCommand(UiState& state, microcodex::CodexApi& api, TurnFuture& turn,
+                const microcodex::SlashCommandRegistry& commands, const std::string& line) {
+    std::optional<std::vector<microcodex::CommandEffect>> effects = commands.dispatch(line, commandSnapshot(api, turn));
+    if (!effects) return false;
+    clearComposer(state);
+    state.scroll = 0;
+    for (microcodex::CommandEffect& effect : *effects) {
+        applyCommandEffect(state, api, turn, std::move(effect));
+    }
+    // A command may have changed the model or the effort shown in the footer.
+    if (auto status = commandSnapshot(api, turn).agent) {
+        state.active_model = std::move(status->model);
+        state.active_effort = std::move(status->reasoning_effort);
+    }
+    state.dirty = true;
+    return true;
+}
+
+void submitInput(UiState& state, microcodex::CodexApi& api, TurnFuture& turn,
+                 const microcodex::SlashCommandRegistry& commands) {
+    if (state.input.starts_with('/') && runCommand(state, api, turn, commands, composerMessage(state))) {
+        return;
+    }
+    startTurn(state, api, turn);
+}
+
+void setComposerText(UiState& state, std::string text) {
+    state.input = std::move(text);
+    state.input_cursor = state.input.size();
+    state.dirty = true;
+}
+
+bool isScrollKey(const tb_event& event) {
+    return event.key == TB_KEY_PGUP || event.key == TB_KEY_PGDN || event.key == TB_KEY_MOUSE_WHEEL_UP ||
+           event.key == TB_KEY_MOUSE_WHEEL_DOWN;
+}
+
+// An open picker is modal: it takes every key except quitting, redrawing
+// and scrolling.
+bool handlePickerKey(UiState& state, microcodex::CodexApi& api, TurnFuture& turn,
+                     const microcodex::SlashCommandRegistry& commands, const tb_event& event) {
+    if (!state.picker || event.key == TB_KEY_CTRL_Q || event.key == TB_KEY_CTRL_L || isScrollKey(event)) {
+        return false;
+    }
+    microcodex::OpenPicker& picker = *state.picker;
+    if (event.key == TB_KEY_ARROW_UP) {
+        picker.selected = picker.selected == 0 ? picker.options.size() - 1 : picker.selected - 1;
+    } else if (event.key == TB_KEY_ARROW_DOWN) {
+        picker.selected = (picker.selected + 1) % picker.options.size();
+    } else if (event.key == TB_KEY_ESC || event.key == TB_KEY_CTRL_C) {
+        state.picker.reset();
+    } else if (event.key == TB_KEY_ENTER) {
+        const std::string line = std::move(picker.options[picker.selected].command);
+        state.picker.reset();
+        if (!runCommand(state, api, turn, commands, line)) {
+            addMessage(state, EntryKind::Error, "Unknown command '" + line + "'");
+        }
+    }
+    state.dirty = true;
+    return true;
+}
+
+// Up and Down select a command, Tab completes its name, and Enter runs it.
+bool handleCommandMenuKey(UiState& state, microcodex::CodexApi& api, TurnFuture& turn,
+                          const microcodex::SlashCommandRegistry& commands, const tb_event& event) {
+    const std::vector<const microcodex::SlashCommand*> matches = commands.completions(state.input);
+    if (matches.empty()) return false;
+    const std::size_t selected = std::min(state.command_selection, matches.size() - 1);
+    const microcodex::SlashCommand& command = *matches[selected];
+    if (event.key == TB_KEY_ARROW_UP) {
+        state.command_selection = selected == 0 ? matches.size() - 1 : selected - 1;
+    } else if (event.key == TB_KEY_ARROW_DOWN) {
+        state.command_selection = (selected + 1) % matches.size();
+    } else if (event.key == TB_KEY_TAB) {
+        const bool takes_arguments = !command.argumentHint().empty();
+        setComposerText(state, "/" + std::string(command.name()) + (takes_arguments ? " " : ""));
+    } else if (event.key == TB_KEY_ENTER) {
+        setComposerText(state, "/" + std::string(command.name()));
+        submitInput(state, api, turn, commands);
+    } else {
+        return false;
+    }
+    state.dirty = true;
+    return true;
 }
 
 void eraseBeforeCursor(UiState& state) {
@@ -1506,7 +1743,8 @@ bool handleControlKey(UiState& state, microcodex::CodexApi& api, const TurnFutur
 }
 
 // Redraw, tool output expansion, newlines, sending, and character erases.
-bool handleEditKey(UiState& state, microcodex::CodexApi& api, TurnFuture& turn, const tb_event& event) {
+bool handleEditKey(UiState& state, microcodex::CodexApi& api, TurnFuture& turn,
+                   const microcodex::SlashCommandRegistry& commands, const tb_event& event) {
     if (event.key == TB_KEY_CTRL_L) {
         tb_invalidate();
         state.dirty = true;
@@ -1523,7 +1761,7 @@ bool handleEditKey(UiState& state, microcodex::CodexApi& api, TurnFuture& turn, 
         return true;
     }
     if (event.key == TB_KEY_ENTER) {
-        startTurn(state, api, turn);
+        submitInput(state, api, turn, commands);
         return true;
     }
     if (event.key == TB_KEY_BACKSPACE || event.key == TB_KEY_BACKSPACE2) {
@@ -1598,14 +1836,19 @@ bool handleScrollKey(UiState& state, const tb_event& event) {
     return false;
 }
 
-void handleKey(UiState& state, microcodex::CodexApi& api, TurnFuture& turn, const tb_event& event) {
-    if (handleQuitOrJumpKey(state, event) || handleControlKey(state, api, turn, event) ||
-        handleEditKey(state, api, turn, event) || handleCursorKey(state, event) || handleScrollKey(state, event)) {
-        return;
-    }
-    if (event.ch != 0 && (tb_iswprint(event.ch) != 0)) {
+void handleKey(UiState& state, microcodex::CodexApi& api, TurnFuture& turn,
+               const microcodex::SlashCommandRegistry& commands, const tb_event& event) {
+    const std::size_t input_size = state.input.size();
+    const bool handled = handlePickerKey(state, api, turn, commands, event) ||
+                         handleCommandMenuKey(state, api, turn, commands, event) || handleQuitOrJumpKey(state, event) ||
+                         handleControlKey(state, api, turn, event) ||
+                         handleEditKey(state, api, turn, commands, event) || handleCursorKey(state, event) ||
+                         handleScrollKey(state, event);
+    if (!handled && event.ch != 0 && (tb_iswprint(event.ch) != 0)) {
         insertCodepoint(state, event.ch);
     }
+    // Editing the filter starts the command menu from its first entry.
+    if (state.input.size() != input_size) state.command_selection = 0;
 }
 
 void stopActiveTurn(UiState& state, PendingEvents& pending, microcodex::CodexApi& api, TurnFuture& turn) {
@@ -1619,7 +1862,8 @@ void stopActiveTurn(UiState& state, PendingEvents& pending, microcodex::CodexApi
 
 // Applies one terminal event. Keys between the bracketed-paste markers are
 // collected into the pending paste instead of being handled as keys.
-void handleEvent(UiState& state, microcodex::CodexApi& api, TurnFuture& turn, const tb_event& event) {
+void handleEvent(UiState& state, microcodex::CodexApi& api, TurnFuture& turn,
+                 const microcodex::SlashCommandRegistry& commands, const tb_event& event) {
     if (event.type == microcodex::terminal::paste_start_event) {
         state.paste.clear();
         state.pasting = true;
@@ -1631,7 +1875,7 @@ void handleEvent(UiState& state, microcodex::CodexApi& api, TurnFuture& turn, co
     } else if (state.pasting && event.type == TB_EVENT_KEY) {
         appendPastedKey(state, event);
     } else if (event.type == TB_EVENT_KEY || event.type == TB_EVENT_MOUSE) {
-        handleKey(state, api, turn, event);
+        handleKey(state, api, turn, commands, event);
     } else if (event.type == TB_EVENT_RESIZE) {
         state.dirty = true;
     }
@@ -1655,11 +1899,12 @@ std::expected<void, std::string> configureTerminal() {
 
 namespace microcodex {
 
-std::expected<void, std::string> runInteractive(CodexApiConfig config) {
+std::expected<void, std::string> runInteractive(CodexApiConfig config, const SlashCommandRegistry& commands) {
     PendingEvents pending;
     CodexEventEmitter emitter([&pending](const CodexEvent& event) { pending.push(event); });
     UiState state;
     state.active_model = config.model;
+    state.active_effort = config.reasoning_effort;
     CodexApi api(std::move(config), emitter);
     TurnFuture turn;
 
@@ -1680,7 +1925,7 @@ std::expected<void, std::string> runInteractive(CodexApiConfig config) {
         collectFinishedTurn(state, pending, turn);
 
         if (state.dirty) {
-            const int rendered = render(state, turn.valid());
+            const int rendered = render(state, commands, turn.valid());
             if (rendered != TB_OK) {
                 terminal_error = "Could not render terminal UI: " + std::string(tb_strerror(rendered));
                 break;
@@ -1690,7 +1935,7 @@ std::expected<void, std::string> runInteractive(CodexApiConfig config) {
         tb_event event{};
         const int polled = tb_peek_event(&event, turn.valid() ? animation_frame_milliseconds : idle_poll_milliseconds);
         if (polled == TB_OK) {
-            handleEvent(state, api, turn, event);
+            handleEvent(state, api, turn, commands, event);
         } else if (polled == TB_ERR_NO_EVENT && turn.valid()) {
             // Only the status row changes between API updates. Redrawing
             // that row avoids re-wrapping and reallocating the transcript
