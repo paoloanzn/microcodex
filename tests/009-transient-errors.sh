@@ -46,6 +46,7 @@ set -- "$drop_home"/conversations/*.jsonl
 [ "$#" -eq 1 ] && [ -f "$1" ] || exit 1
 drop_id=$(basename "$1" .jsonl)
 
+# shellcheck disable=SC2016 # The inner sh -c expands its own arguments.
 expect_process "T9.5: the dropped turn keeps its partial text and marker" 0 \
     sh -c 'grep -q "Partial then drop" "$0"/conversations/*.jsonl && grep -q "<turn_aborted>" "$0"/conversations/*.jsonl' "$drop_home" <<'STDOUT' 3<<'STDERR'
 STDOUT
@@ -69,6 +70,7 @@ STDOUT
 Agent failed: boom
 STDERR
 
+# shellcheck disable=SC2016 # The inner sh -c expands its own arguments.
 expect_process "T9.8: the transactional stream failure saves no aborted turn" 0 \
     sh -c '! grep -q "<turn_aborted>" "$0"/conversations/*.jsonl' "$stream_home" <<'STDOUT' 3<<'STDERR'
 STDOUT

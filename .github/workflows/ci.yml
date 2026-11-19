@@ -1,3 +1,7 @@
+# Format check, clang-tidy lint, script lint, and warning-free builds and tests
+# on Linux and macOS. Runs on every push and pull request; the release
+# workflow also calls it, so release artifacts are only published when CI
+# passes on the released commit.
 name: CI
 
 on:
@@ -19,6 +23,71 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'workflow_call' }}
 
 jobs:
+  format:
+    name: Format
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Install clang-format
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq clang-format-18
+
+      - name: Check formatting
+        run: make format-check CLANG_FORMAT=clang-format-18
+
+  lint:
+    name: Lint (clang-tidy, -Werror)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source and dependencies
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          submodules: recursive
+          persist-credentials: false
+
+      # clang-tidy 18 cannot parse libstdc++'s <expected>, so lint with 19.
+      - name: Install lint tools and headers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang-tidy-19 libcurl4-openssl-dev libssl-dev
+
+      - name: Lint with clang-tidy
+        run: make --jobs 4 lint CLANG_TIDY=clang-tidy-19
+
+  scripts:
+    name: Lint scripts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Check shell scripts
+        run: shellcheck install.sh launcher.sh tests/*.sh
+
+      # ruby -wc exits successfully even when it prints warnings.
+      - name: Check Ruby test fixtures
+        run: |
+          status=0
+          for fixture in tests/*.rb; do
+            output=$(ruby -wc "$fixture" 2>&1) || status=1
+            if [ "$output" != "Syntax OK" ]; then
+              printf '%s: %s\n' "$fixture" "$output"
+              status=1
+            fi
+          done
+          exit "$status"
+
   linux-build-and-test:
     name: Verify ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
@@ -70,7 +139,7 @@ jobs:
           ./install.sh --help >/dev/null
 
       - name: Build
-        run: make --jobs 3 all
+        run: make --jobs 3 all WERROR=1
 
       - name: Test
         run: make test
@@ -154,7 +223,7 @@ jobs:
           ./install.sh --help >/dev/null
 
       - name: Build
-        run: make --jobs 3 all
+        run: make --jobs 3 all WERROR=1
 
       - name: Test
         run: make test

@@ -1,4 +1,5 @@
 #!/bin/sh
+# shellcheck disable=SC2154 # run.sh sets tests_run before sourcing this file.
 
 interrupt_home=$TEST_WORKDIR/interrupt-home
 write_test_credentials "$interrupt_home" || exit 1

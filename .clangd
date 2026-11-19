@@ -1,3 +1,31 @@
+# clangd configuration. Run `make` once so that build/compile_commands.json
+# exists; clangd reads the compile flags from it.
 CompileFlags:
+  CompilationDatabase: build
   Compiler: /opt/homebrew/opt/llvm/bin/clang++
-  Add: [-std=c++23, -Wall, -Wextra, -pthread, -isystem, vendor/termbox2]
+  # GCC-only warnings from the Makefile that clang does not know.
+  Remove: [-Wduplicated-cond, -Wduplicated-branches, -Wlogical-op, -Wuseless-cast]
+
+Diagnostics:
+  # Lint with the checks in .clang-tidy (clangd picks it up automatically).
+  UnusedIncludes: Strict
+  MissingIncludes: Strict
+  Includes:
+    # Mirrors misc-include-cleaner.IgnoreHeaders in .clang-tidy.
+    IgnoreHeader: ['curl/.*', 'bits/.*', 'asm/.*', 'asm-generic/.*', 'sched\.h', 'sys/poll\.h']
+
+Index:
+  Background: Build
+  StandardLibrary: Yes
+
+InlayHints:
+  Enabled: true
+  ParameterNames: true
+  DeducedTypes: true
+  Designators: true
+
+Hover:
+  ShowAKA: true
+
+Completion:
+  AllScopes: true

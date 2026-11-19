@@ -3,40 +3,41 @@
 
 #include "event-emitter.h"
 
+#include <mutex>
 #include <utility>
 
 namespace microcodex {
 
-    CodexEventEmitter::CodexEventEmitter(CodexEventHandler handler) : handler_(std::move(handler)) {}
+CodexEventEmitter::CodexEventEmitter(CodexEventHandler handler) : handler_(std::move(handler)) {}
 
-    void CodexEventEmitter::setHandler(CodexEventHandler handler) {
-        std::lock_guard lock(mutex_);
-        handler_ = std::move(handler);
-    }
+void CodexEventEmitter::setHandler(CodexEventHandler handler) {
+    const std::lock_guard lock(mutex_);
+    handler_ = std::move(handler);
+}
 
-    void CodexEventEmitter::clearHandler() {
-        std::lock_guard lock(mutex_);
-        handler_ = {};
-    }
+void CodexEventEmitter::clearHandler() {
+    const std::lock_guard lock(mutex_);
+    handler_ = {};
+}
 
-    void CodexEventEmitter::emit(const CodexEvent &event) const noexcept {
-        try {
-            CodexEventHandler handler;
-            {
-                std::lock_guard lock(mutex_);
-                handler = handler_;
-            }
-            if (!handler) {
-                return;
-            }
-
-            // Invoke outside the mutex. A handler may replace itself or ask
-            // CodexApi to interrupt the active turn without deadlocking here.
-            handler(event);
-        } catch (...) {
-            // Presentation code must not be able to corrupt conversation state
-            // or strand an in-flight turn by throwing through the emitter.
+void CodexEventEmitter::emit(const CodexEvent& event) const noexcept {
+    try {
+        CodexEventHandler handler;
+        {
+            const std::lock_guard lock(mutex_);
+            handler = handler_;
         }
-    }
+        if (!handler) {
+            return;
+        }
 
-} // namespace microcodex
+        // Invoke outside the mutex. A handler may replace itself or ask
+        // CodexApi to interrupt the active turn without deadlocking here.
+        handler(event);
+        // Presentation code must not be able to corrupt conversation state
+        // or strand an in-flight turn by throwing through the emitter.
+        // NOLINTNEXTLINE(bugprone-empty-catch): handler failures are deliberately dropped.
+    } catch (...) {}
+}
+
+}  // namespace microcodex

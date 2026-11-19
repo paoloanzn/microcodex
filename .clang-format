@@ -1,0 +1,35 @@
+# Formatting for microcodex sources, checked in CI with clang-format 18. Google
+# style with a 4-space indent, 120 columns and short single-line bodies.
+---
+Language: Cpp
+BasedOnStyle: Google
+Standard: Latest
+ColumnLimit: 120
+IndentWidth: 4
+AccessModifierOffset: -4
+PointerAlignment: Left
+DerivePointerAlignment: false
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+AllowShortBlocksOnASingleLine: Empty
+AllowShortLambdasOnASingleLine: All
+AllowShortCaseLabelsOnASingleLine: true
+InsertNewlineAtEOF: true
+# `const T x`, never `T const x`.
+QualifierAlignment: Left
+# Includes: own header, third-party, POSIX, standard library, project.
+IncludeBlocks: Regroup
+SortIncludes: CaseSensitive
+IncludeCategories:
+  - Regex: '^<(arpa|netinet|sys)/.*\.h>$'
+    Priority: 2
+  - Regex: '^<(fcntl|glob|poll|signal|spawn|stdlib|unistd)\.h>$'
+    Priority: 2
+  - Regex: '^<[a-z_]+>$'
+    Priority: 3
+  - Regex: '^<.*>$'
+    Priority: 1
+  - Regex: '^".*"$'
+    Priority: 4
+...

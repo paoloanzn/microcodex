@@ -2,6 +2,7 @@
 
 tool_home=$TEST_WORKDIR/tool-home
 write_test_credentials "$tool_home" || exit 1
+# shellcheck disable=SC2034 # run.sh runs each case from case_cwd.
 case_cwd=$TEST_PROJECT
 
 expect_process "T3.1: a model tool call mutates the working tree and returns its result" 0 \

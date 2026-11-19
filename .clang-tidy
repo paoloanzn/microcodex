@@ -1,0 +1,83 @@
+# Strict lint profile for microcodex. Every check family is on; the exclusions
+# below are deliberate and each one is explained.
+#
+#   readability-identifier-length         Short names (e, v, i) are idiomatic in
+#                                         the small scopes where they are used.
+#   modernize-use-trailing-return-type    Style only; the codebase uses leading
+#                                         return types.
+#   readability-braces-around-statements  Single-statement bodies stay brace-less;
+#   google-readability-braces-around-...  clang-format fixes their indentation and
+#                                         -Wmisleading-indentation catches the
+#                                         hazard the check guards against.
+#   readability-magic-numbers             Byte layouts, offsets and sizes come
+#   cppcoreguidelines-avoid-magic-numbers from the Solana wire formats.
+#   misc-no-recursion                     The checker and interpreter walk a
+#                                         recursive AST; recursion is the design.
+#   cppcoreguidelines-avoid-const-or-     Reference members (Diagnostics&,
+#     ref-data-members                    std::ostream&) are intended non-owning,
+#                                         non-reassignable collaborators.
+#   modernize-return-braced-init-list     `return Value(x)` names the variant type
+#                                         being produced; `return {x}` hides it.
+#   google-readability-todo               No TODO(username) convention.
+#   google-runtime-int                    libcurl takes and returns `long` (option
+#                                         values, CURLINFO_RESPONSE_CODE), and the
+#                                         int64_t alias is `long` on Linux but
+#                                         `long long` on macOS.
+Checks: >
+  -*,
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  concurrency-*,
+  cppcoreguidelines-*,
+  google-*,
+  misc-*,
+  modernize-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  -readability-identifier-length,
+  -modernize-use-trailing-return-type,
+  -readability-braces-around-statements,
+  -google-readability-braces-around-statements,
+  -readability-magic-numbers,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -misc-no-recursion,
+  -cppcoreguidelines-avoid-const-or-ref-data-members,
+  -modernize-return-braced-init-list,
+  -google-readability-todo,
+  -google-runtime-int
+WarningsAsErrors: ''
+# Vendored headers are included with -isystem, so they are skipped as system
+# headers; every other header is linted.
+HeaderFilterRegex: '.*'
+FormatStyle: file
+CheckOptions:
+  misc-non-private-member-variables-in-classes.IgnoreClassesWithAllMemberVariablesBeingPublic: true
+  readability-implicit-bool-conversion.AllowPointerConditions: true
+  readability-function-cognitive-complexity.IgnoreMacros: true
+  # Judge thread safety by glibc's documented MT-Safe list. The POSIX list also
+  # flags getenv, which is safe here because nothing modifies the environment.
+  concurrency-mt-unsafe.FunctionSet: glibc
+  # std::stop_token is a shared handle meant to be passed by value, and tool
+  # callbacks are stored as function pointers that take it by value.
+  performance-unnecessary-value-param.AllowedTypes: 'std::stop_token'
+  # curl/curl.h is libcurl's documented umbrella header. The others are glibc
+  # internals that include-cleaner names instead of the POSIX header (pid_t from
+  # <sched.h>, poll from <sys/poll.h>); including them directly would break or
+  # mislead macOS builds. POSIX headers whose symbols glibc defines elsewhere
+  # (<poll.h>, <arpa/inet.h>) are kept with `IWYU pragma: keep`.
+  misc-include-cleaner.IgnoreHeaders: 'curl/.*;bits/.*;asm/.*;asm-generic/.*;sched\.h;sys/poll\.h'
+  readability-identifier-naming.NamespaceCase: lower_case
+  readability-identifier-naming.ClassCase: CamelCase
+  readability-identifier-naming.EnumCase: CamelCase
+  readability-identifier-naming.EnumConstantCase: CamelCase
+  readability-identifier-naming.FunctionCase: camelBack
+  readability-identifier-naming.MethodCase: camelBack
+  readability-identifier-naming.VariableCase: lower_case
+  readability-identifier-naming.ParameterCase: lower_case
+  readability-identifier-naming.MemberCase: lower_case
+  readability-identifier-naming.PrivateMemberSuffix: _
+  readability-identifier-naming.ConstexprVariableCase: lower_case
+  readability-identifier-naming.TemplateParameterCase: CamelCase
+  readability-identifier-naming.MacroDefinitionCase: UPPER_CASE

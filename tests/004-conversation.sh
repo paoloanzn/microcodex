@@ -45,6 +45,7 @@ assistant: Alpha and beta recalled
 STDOUT
 STDERR
 
+# shellcheck disable=SC2016 # The inner sh -c expands its own arguments.
 expect_process "T4.5: list reads conversation metadata without login" 0 \
     sh -c 'CODEX_HOME="$1" PATH="$2:$PATH" microcodex list | cut -f1,3' \
         sh "$conversation_home" "$TEST_BIN_DIR" <<STDOUT 3<<'STDERR'

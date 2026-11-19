@@ -5,40 +5,39 @@
 
 #include <cstddef>
 #include <expected>
-#include <fstream> 
+#include <fstream>
 #include <iostream>
+#include <string>
+#include <string_view>
 
 namespace {
 
-    bool doesFileExist(const std::string& path) {
-        std::ifstream file(path, std::ios::binary);
-        if (!file) {
-            return false;
-        }
-        return true;
-    }
+bool doesFileExist(const std::string& path) {
+    const std::ifstream file(path, std::ios::binary);
+    return !!file;
+}
 
-} // namespace
+}  // namespace
 
 namespace microcodex {
 
-    std::expected<int, std::string> write(const std::string& path, std::string_view content) {
-        if (doesFileExist(path)) {
-            return std::unexpected("Overwriting an existing file is not allowed");
-        }
-
-        std::ofstream file(path, std::ios::out  | std::ios::trunc);
-        if (!file) {
-            return std::unexpected("Could not create file");
-        }
-
-        file << content;
-
-        if (!file) {
-            return std::unexpected("Failed to write to file");
-        }
-
-        return NULL;
+std::expected<int, std::string> write(const std::string& path, std::string_view content) {
+    if (doesFileExist(path)) {
+        return std::unexpected("Overwriting an existing file is not allowed");
     }
 
-} // namespace microcodex
+    std::ofstream file(path, std::ios::out | std::ios::trunc);
+    if (!file) {
+        return std::unexpected("Could not create file");
+    }
+
+    file << content;
+
+    if (!file) {
+        return std::unexpected("Failed to write to file");
+    }
+
+    return NULL;
+}
+
+}  // namespace microcodex

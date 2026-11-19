@@ -4,443 +4,481 @@
 #include "json.h"
 
 #include <cctype>
+#include <cstddef>
 #include <cstdint>
+#include <expected>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 namespace microcodex::json {
 
-    using JsonMember = std::expected<std::optional<std::string_view>, std::string>;
+using JsonMember = std::expected<std::optional<std::string_view>, std::string>;
 
-    // Advance past JSON whitespace so callers can examine the next token.
-    // Example: for "  true", starting at 0 leaves position at the 't'.
-    void skipWhitespace(const std::string_view json, std::size_t &position) {
-        while (position < json.size() && std::isspace(static_cast<unsigned char>(json[position]))) {
-            ++position;
-        }
-    }
-
-    int hexDigit(const char character) {
-        if (character >= '0' && character <= '9') {
-            return character - '0';
-        }
-        if (character >= 'a' && character <= 'f') {
-            return character - 'a' + 10;
-        }
-        if (character >= 'A' && character <= 'F') {
-            return character - 'A' + 10;
-        }
-        return -1;
-    }
-
-    std::expected<std::uint32_t, std::string> parseHexCodePoint(const std::string_view json, std::size_t &position) {
-        if (json.size() - position < 4) {
-            return std::unexpected("Incomplete Unicode escape in JSON string");
-        }
-
-        std::uint32_t code_point = 0;
-        for (std::size_t index = 0; index < 4; ++index) {
-            const int digit = hexDigit(json[position++]);
-            if (digit < 0) {
-                return std::unexpected("Invalid Unicode escape in JSON string");
-            }
-            code_point = code_point * 16 + static_cast<std::uint32_t>(digit);
-        }
-
-        return code_point;
-    }
-
-    // Encode one decoded \uXXXX value as UTF-8. Surrogate pairs are combined by
-    // parseJsonString before reaching this routine.
-    void appendUtf8(std::string &output, const std::uint32_t code_point) {
-        if (code_point <= 0x7f) {
-            output += static_cast<char>(code_point);
-        } else if (code_point <= 0x7ff) {
-            output += static_cast<char>(0xc0 | (code_point >> 6));
-            output += static_cast<char>(0x80 | (code_point & 0x3f));
-        } else if (code_point <= 0xffff) {
-            output += static_cast<char>(0xe0 | (code_point >> 12));
-            output += static_cast<char>(0x80 | ((code_point >> 6) & 0x3f));
-            output += static_cast<char>(0x80 | (code_point & 0x3f));
-        } else {
-            output += static_cast<char>(0xf0 | (code_point >> 18));
-            output += static_cast<char>(0x80 | ((code_point >> 12) & 0x3f));
-            output += static_cast<char>(0x80 | ((code_point >> 6) & 0x3f));
-            output += static_cast<char>(0x80 | (code_point & 0x3f));
-        }
-    }
-
-    // Parse one quoted JSON string, unescaping characters and Unicode escapes.
-    // Example: parsing "\"line\\n\"" returns a string containing line + '\n'.
-    // On success position points immediately after the closing quote.
-    std::expected<std::string, std::string> parseJsonString(const std::string_view json, std::size_t &position) {
-        if (position == json.size() || json[position] != '"') {
-            return std::unexpected("Expected a JSON string");
-        }
-
+// Advance past JSON whitespace so callers can examine the next token.
+// Example: for "  true", starting at 0 leaves position at the 't'.
+void skipWhitespace(const std::string_view json, std::size_t& position) {
+    while (position < json.size() && (std::isspace(static_cast<unsigned char>(json[position])) != 0)) {
         ++position;
-        std::string result;
+    }
+}
 
-        while (position < json.size()) {
-            const unsigned char character = static_cast<unsigned char>(json[position++]);
+namespace {
 
-            if (character == '"') {
-                return result;
-            }
-            if (character < 0x20) {
-                return std::unexpected("Control character in JSON string");
-            }
-            if (character != '\\') {
-                result += static_cast<char>(character);
-                continue;
-            }
-            if (position == json.size()) {
-                return std::unexpected("Incomplete escape in JSON string");
-            }
+int hexDigit(const char character) {
+    if (character >= '0' && character <= '9') {
+        return character - '0';
+    }
+    if (character >= 'a' && character <= 'f') {
+        return character - 'a' + 10;
+    }
+    if (character >= 'A' && character <= 'F') {
+        return character - 'A' + 10;
+    }
+    return -1;
+}
 
-            const char escaped = json[position++];
-            switch (escaped) {
-            case '"':
-                result += '"';
-                break;
-            case '\\':
-                result += '\\';
-                break;
-            case '/':
-                result += '/';
-                break;
-            case 'b':
-                result += '\b';
-                break;
-            case 'f':
-                result += '\f';
-                break;
-            case 'n':
-                result += '\n';
-                break;
-            case 'r':
-                result += '\r';
-                break;
-            case 't':
-                result += '\t';
-                break;
-            case 'u': {
-                auto first = parseHexCodePoint(json, position);
-                if (!first) {
-                    return std::unexpected(first.error());
-                }
-
-                std::uint32_t code_point = first.value();
-                if (code_point >= 0xd800 && code_point <= 0xdbff) {
-                    if (json.size() - position < 6 || json[position] != '\\' ||
-                        json[position + 1] != 'u') {
-                        return std::unexpected("Missing low surrogate in JSON string");
-                    }
-                    position += 2;
-                    auto second = parseHexCodePoint(json, position);
-                    if (!second || second.value() < 0xdc00 || second.value() > 0xdfff) {
-                        return std::unexpected("Invalid low surrogate in JSON string");
-                    }
-                    code_point =
-                        0x10000 + ((code_point - 0xd800) << 10) + (second.value() - 0xdc00);
-                } else if (code_point >= 0xdc00 && code_point <= 0xdfff) {
-                    return std::unexpected("Unexpected low surrogate in JSON string");
-                }
-
-                appendUtf8(result, code_point);
-                break;
-            }
-            default:
-                return std::unexpected("Invalid escape in JSON string");
-            }
-        }
-
-        return std::unexpected("Unterminated JSON string");
+std::expected<std::uint32_t, std::string> parseHexCodePoint(const std::string_view json, std::size_t& position) {
+    if (json.size() - position < 4) {
+        return std::unexpected("Incomplete Unicode escape in JSON string");
     }
 
-    // Validate and skip exactly one JSON value without building a value tree.
-    // This makes it possible to retain lightweight views, e.g. skip {"a":[1,2]}
-    // and then slice the original input. The depth limit rejects hostile nesting.
-    std::expected<void, std::string>
-    skipJsonValue(const std::string_view json, std::size_t &position, const std::size_t depth) {
-        if (depth > 128) {
-            return std::unexpected("JSON is nested too deeply");
+    std::uint32_t code_point = 0;
+    for (std::size_t index = 0; index < 4; ++index) {
+        const int digit = hexDigit(json[position++]);
+        if (digit < 0) {
+            return std::unexpected("Invalid Unicode escape in JSON string");
+        }
+        code_point = code_point * 16 + static_cast<std::uint32_t>(digit);
+    }
+
+    return code_point;
+}
+
+// Encode one decoded \uXXXX value as UTF-8. Surrogate pairs are combined by
+// parseJsonString before reaching this routine.
+void appendUtf8(std::string& output, const std::uint32_t code_point) {
+    if (code_point <= 0x7f) {
+        output += static_cast<char>(code_point);
+    } else if (code_point <= 0x7ff) {
+        output += static_cast<char>(0xc0 | (code_point >> 6));
+        output += static_cast<char>(0x80 | (code_point & 0x3f));
+    } else if (code_point <= 0xffff) {
+        output += static_cast<char>(0xe0 | (code_point >> 12));
+        output += static_cast<char>(0x80 | ((code_point >> 6) & 0x3f));
+        output += static_cast<char>(0x80 | (code_point & 0x3f));
+    } else {
+        output += static_cast<char>(0xf0 | (code_point >> 18));
+        output += static_cast<char>(0x80 | ((code_point >> 12) & 0x3f));
+        output += static_cast<char>(0x80 | ((code_point >> 6) & 0x3f));
+        output += static_cast<char>(0x80 | (code_point & 0x3f));
+    }
+}
+
+// Decode the \uXXXX escape whose "\u" was just consumed, combining a surrogate
+// pair into one code point, and append it to result as UTF-8.
+std::expected<void, std::string> appendUnicodeEscape(const std::string_view json, std::size_t& position,
+                                                     std::string& result) {
+    auto first = parseHexCodePoint(json, position);
+    if (!first) {
+        return std::unexpected(first.error());
+    }
+
+    std::uint32_t code_point = first.value();
+    if (code_point >= 0xd800 && code_point <= 0xdbff) {
+        if (json.size() - position < 6 || json[position] != '\\' || json[position + 1] != 'u') {
+            return std::unexpected("Missing low surrogate in JSON string");
+        }
+        position += 2;
+        auto second = parseHexCodePoint(json, position);
+        if (!second || second.value() < 0xdc00 || second.value() > 0xdfff) {
+            return std::unexpected("Invalid low surrogate in JSON string");
+        }
+        code_point = 0x10000 + ((code_point - 0xd800) << 10) + (second.value() - 0xdc00);
+    } else if (code_point >= 0xdc00 && code_point <= 0xdfff) {
+        return std::unexpected("Unexpected low surrogate in JSON string");
+    }
+
+    appendUtf8(result, code_point);
+    return {};
+}
+
+// Append the character an escape sequence stands for. escaped is the byte after
+// the backslash; position points just past it.
+std::expected<void, std::string> appendEscape(const char escaped, const std::string_view json, std::size_t& position,
+                                              std::string& result) {
+    switch (escaped) {
+        case '"': result += '"'; return {};
+        case '\\': result += '\\'; return {};
+        case '/': result += '/'; return {};
+        case 'b': result += '\b'; return {};
+        case 'f': result += '\f'; return {};
+        case 'n': result += '\n'; return {};
+        case 'r': result += '\r'; return {};
+        case 't': result += '\t'; return {};
+        case 'u': return appendUnicodeEscape(json, position, result);
+        default: return std::unexpected("Invalid escape in JSON string");
+    }
+}
+
+}  // namespace
+
+// Parse one quoted JSON string, unescaping characters and Unicode escapes.
+// Example: parsing "\"line\\n\"" returns a string containing line + '\n'.
+// On success position points immediately after the closing quote.
+std::expected<std::string, std::string> parseJsonString(const std::string_view json, std::size_t& position) {
+    if (position == json.size() || json[position] != '"') {
+        return std::unexpected("Expected a JSON string");
+    }
+
+    ++position;
+    std::string result;
+
+    while (position < json.size()) {
+        const auto character = static_cast<unsigned char>(json[position++]);
+
+        if (character == '"') {
+            return result;
+        }
+        if (character < 0x20) {
+            return std::unexpected("Control character in JSON string");
+        }
+        if (character != '\\') {
+            result += static_cast<char>(character);
+            continue;
+        }
+        if (position == json.size()) {
+            return std::unexpected("Incomplete escape in JSON string");
         }
 
+        const char escaped = json[position++];
+        auto appended = appendEscape(escaped, json, position, result);
+        if (!appended) {
+            return std::unexpected(std::move(appended.error()));
+        }
+    }
+
+    return std::unexpected("Unterminated JSON string");
+}
+
+namespace {
+
+// Advance past a run of decimal digits.
+void skipDigits(const std::string_view json, std::size_t& position) {
+    while (position < json.size() && (std::isdigit(static_cast<unsigned char>(json[position])) != 0)) {
+        ++position;
+    }
+}
+
+// Skip the members of an object whose '{' was just consumed.
+std::expected<void, std::string> skipJsonObject(const std::string_view json, std::size_t& position,
+                                                const std::size_t depth) {
+    skipWhitespace(json, position);
+    if (position < json.size() && json[position] == '}') {
+        ++position;
+        return {};
+    }
+
+    while (position < json.size()) {
+        auto key = parseJsonString(json, position);
+        if (!key) {
+            return std::unexpected(key.error());
+        }
         skipWhitespace(json, position);
         if (position == json.size()) {
-            return std::unexpected("Expected a JSON value");
+            return std::unexpected("Expected ':' in JSON object");
         }
-
-        if (json[position] == '"') {
-            auto string = parseJsonString(json, position);
-            if (!string) {
-                return std::unexpected(string.error());
-            }
-            return {};
+        const char colon = json[position++];
+        if (colon != ':') {
+            return std::unexpected("Expected ':' in JSON object");
         }
-
-        if (json[position] == '{') {
-            ++position;
-            skipWhitespace(json, position);
-            if (position < json.size() && json[position] == '}') {
-                ++position;
-                return {};
-            }
-
-            while (position < json.size()) {
-                auto key = parseJsonString(json, position);
-                if (!key) {
-                    return std::unexpected(key.error());
-                }
-                skipWhitespace(json, position);
-                if (position == json.size() || json[position++] != ':') {
-                    return std::unexpected("Expected ':' in JSON object");
-                }
-                auto value = skipJsonValue(json, position, depth + 1);
-                if (!value) {
-                    return value;
-                }
-                skipWhitespace(json, position);
-                if (position == json.size()) {
-                    return std::unexpected("Unterminated JSON object");
-                }
-                const char separator = json[position++];
-                if (separator == '}') {
-                    return {};
-                }
-                if (separator != ',') {
-                    return std::unexpected("Expected ',' in JSON object");
-                }
-                skipWhitespace(json, position);
-            }
+        auto value = skipJsonValue(json, position, depth + 1);
+        if (!value) {
+            return value;
+        }
+        skipWhitespace(json, position);
+        if (position == json.size()) {
             return std::unexpected("Unterminated JSON object");
         }
+        const char separator = json[position++];
+        if (separator == '}') {
+            return {};
+        }
+        if (separator != ',') {
+            return std::unexpected("Expected ',' in JSON object");
+        }
+        skipWhitespace(json, position);
+    }
+    return std::unexpected("Unterminated JSON object");
+}
 
-        if (json[position] == '[') {
-            ++position;
-            skipWhitespace(json, position);
-            if (position < json.size() && json[position] == ']') {
-                ++position;
-                return {};
-            }
+// Skip the elements of an array whose '[' was just consumed.
+std::expected<void, std::string> skipJsonArray(const std::string_view json, std::size_t& position,
+                                               const std::size_t depth) {
+    skipWhitespace(json, position);
+    if (position < json.size() && json[position] == ']') {
+        ++position;
+        return {};
+    }
 
-            while (position < json.size()) {
-                auto value = skipJsonValue(json, position, depth + 1);
-                if (!value) {
-                    return value;
-                }
-                skipWhitespace(json, position);
-                if (position == json.size()) {
-                    return std::unexpected("Unterminated JSON array");
-                }
-                const char separator = json[position++];
-                if (separator == ']') {
-                    return {};
-                }
-                if (separator != ',') {
-                    return std::unexpected("Expected ',' in JSON array");
-                }
-            }
+    while (position < json.size()) {
+        auto value = skipJsonValue(json, position, depth + 1);
+        if (!value) {
+            return value;
+        }
+        skipWhitespace(json, position);
+        if (position == json.size()) {
             return std::unexpected("Unterminated JSON array");
         }
-
-        for (const std::string_view literal : {"true", "false", "null"}) {
-            if (json.substr(position, literal.size()) == literal) {
-                position += literal.size();
-                return {};
-            }
+        const char separator = json[position++];
+        if (separator == ']') {
+            return {};
         }
-
-        const std::size_t start = position;
-        if (json[position] == '-') {
-            ++position;
+        if (separator != ',') {
+            return std::unexpected("Expected ',' in JSON array");
         }
-        if (position == json.size()) {
+    }
+    return std::unexpected("Unterminated JSON array");
+}
+
+// Skip a JSON number: an optional minus, an integer part without leading zeros,
+// then an optional fraction and exponent.
+std::expected<void, std::string> skipJsonNumber(const std::string_view json, std::size_t& position) {
+    const std::size_t start = position;
+    if (json[position] == '-') {
+        ++position;
+    }
+    if (position == json.size()) {
+        return std::unexpected("Invalid JSON number");
+    }
+    if (json[position] == '0') {
+        ++position;
+    } else if (json[position] >= '1' && json[position] <= '9') {
+        skipDigits(json, position);
+    } else {
+        return std::unexpected("Invalid JSON value");
+    }
+    if (position < json.size() && json[position] == '.') {
+        ++position;
+        const std::size_t fraction_start = position;
+        skipDigits(json, position);
+        if (position == fraction_start) {
             return std::unexpected("Invalid JSON number");
         }
-        if (json[position] == '0') {
+    }
+    if (position < json.size() && (json[position] == 'e' || json[position] == 'E')) {
+        ++position;
+        if (position < json.size() && (json[position] == '+' || json[position] == '-')) {
             ++position;
-        } else if (json[position] >= '1' && json[position] <= '9') {
-            while (position < json.size() &&
-                   std::isdigit(static_cast<unsigned char>(json[position]))) {
-                ++position;
-            }
-        } else {
-            return std::unexpected("Invalid JSON value");
         }
-        if (position < json.size() && json[position] == '.') {
-            ++position;
-            const std::size_t fraction_start = position;
-            while (position < json.size() &&
-                   std::isdigit(static_cast<unsigned char>(json[position]))) {
-                ++position;
-            }
-            if (position == fraction_start) {
-                return std::unexpected("Invalid JSON number");
-            }
+        const std::size_t exponent_start = position;
+        skipDigits(json, position);
+        if (position == exponent_start) {
+            return std::unexpected("Invalid JSON number");
         }
-        if (position < json.size() && (json[position] == 'e' || json[position] == 'E')) {
-            ++position;
-            if (position < json.size() && (json[position] == '+' || json[position] == '-')) {
-                ++position;
-            }
-            const std::size_t exponent_start = position;
-            while (position < json.size() &&
-                   std::isdigit(static_cast<unsigned char>(json[position]))) {
-                ++position;
-            }
-            if (position == exponent_start) {
-                return std::unexpected("Invalid JSON number");
-            }
-        }
-        if (position == start) {
-            return std::unexpected("Invalid JSON value");
+    }
+    if (position == start) {
+        return std::unexpected("Invalid JSON value");
+    }
+    return {};
+}
+
+}  // namespace
+
+// Validate and skip exactly one JSON value without building a value tree.
+// This makes it possible to retain lightweight views, e.g. skip {"a":[1,2]}
+// and then slice the original input. The depth limit rejects hostile nesting.
+std::expected<void, std::string> skipJsonValue(const std::string_view json, std::size_t& position,
+                                               const std::size_t depth) {
+    if (depth > 128) {
+        return std::unexpected("JSON is nested too deeply");
+    }
+
+    skipWhitespace(json, position);
+    if (position == json.size()) {
+        return std::unexpected("Expected a JSON value");
+    }
+
+    if (json[position] == '"') {
+        auto string = parseJsonString(json, position);
+        if (!string) {
+            return std::unexpected(string.error());
         }
         return {};
     }
 
-    // Locate a direct member of an object and return an unparsed view of its value.
-    // Example: findJsonMember("{\"ok\":true}", "ok") yields the view "true".
-    // A missing key is successful and represented by an empty optional.
-    JsonMember findJsonMember(const std::string_view object, const std::string_view wanted_key) {
-        std::size_t position = 0;
-        skipWhitespace(object, position);
-        if (position == object.size() || object[position++] != '{') {
-            return std::unexpected("Expected a JSON object");
-        }
-
-        skipWhitespace(object, position);
-        if (position < object.size() && object[position] == '}') {
-            return std::optional<std::string_view>{};
-        }
-
-        while (position < object.size()) {
-            auto key = parseJsonString(object, position);
-            if (!key) {
-                return std::unexpected(key.error());
-            }
-            skipWhitespace(object, position);
-            if (position == object.size() || object[position++] != ':') {
-                return std::unexpected("Expected ':' in JSON object");
-            }
-            skipWhitespace(object, position);
-
-            const std::size_t value_start = position;
-            auto value = skipJsonValue(object, position);
-            if (!value) {
-                return std::unexpected(value.error());
-            }
-            if (key.value() == wanted_key) {
-                return std::optional<std::string_view>{
-                    object.substr(value_start, position - value_start)};
-            }
-
-            skipWhitespace(object, position);
-            if (position == object.size()) {
-                return std::unexpected("Unterminated JSON object");
-            }
-            const char separator = object[position++];
-            if (separator == '}') {
-                return std::optional<std::string_view>{};
-            }
-            if (separator != ',') {
-                return std::unexpected("Expected ',' in JSON object");
-            }
-            skipWhitespace(object, position);
-        }
-
-        return std::unexpected("Unterminated JSON object");
+    if (json[position] == '{') {
+        ++position;
+        return skipJsonObject(json, position, depth);
     }
 
-    // Read an optional string-valued member, decoding JSON escapes when present.
-    // Example: jsonStringMember("{\"name\":\"Ada\"}", "name") returns "Ada".
-    std::expected<std::optional<std::string>, std::string>
-    jsonStringMember(const std::string_view object, const std::string_view key) {
-        auto member = findJsonMember(object, key);
-        if (!member) {
-            return std::unexpected(member.error());
-        }
-        if (!member.value()) {
-            return std::optional<std::string>{};
-        }
-
-        std::size_t position = 0;
-        auto value = parseJsonString(member.value().value(), position);
-        if (!value) {
-            return std::unexpected("JSON member '" + std::string(key) + "' is not a string");
-        }
-        skipWhitespace(member.value().value(), position);
-        if (position != member.value()->size()) {
-            return std::unexpected("Invalid JSON string member '" + std::string(key) + "'");
-        }
-        return std::optional<std::string>{std::move(value.value())};
+    if (json[position] == '[') {
+        ++position;
+        return skipJsonArray(json, position, depth);
     }
 
-    // Like jsonStringMember, but report an error when the key is absent.
-    std::expected<std::string, std::string> requiredJsonString(const std::string_view object, const std::string_view key) {
-        auto value = jsonStringMember(object, key);
+    for (const std::string_view literal : {"true", "false", "null"}) {
+        if (json.substr(position, literal.size()) == literal) {
+            position += literal.size();
+            return {};
+        }
+    }
+
+    return skipJsonNumber(json, position);
+}
+
+// Locate a direct member of an object and return an unparsed view of its value.
+// Example: findJsonMember("{\"ok\":true}", "ok") yields the view "true".
+// A missing key is successful and represented by an empty optional.
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters): the document and the key it is searched for.
+JsonMember findJsonMember(const std::string_view object, const std::string_view wanted_key) {
+    std::size_t position = 0;
+    skipWhitespace(object, position);
+    if (position == object.size() || object[position] != '{') {
+        return std::unexpected("Expected a JSON object");
+    }
+    ++position;
+
+    skipWhitespace(object, position);
+    if (position < object.size() && object[position] == '}') {
+        return std::optional<std::string_view>{};
+    }
+
+    while (position < object.size()) {
+        auto key = parseJsonString(object, position);
+        if (!key) {
+            return std::unexpected(key.error());
+        }
+        skipWhitespace(object, position);
+        if (position == object.size()) {
+            return std::unexpected("Expected ':' in JSON object");
+        }
+        const char colon = object[position++];
+        if (colon != ':') {
+            return std::unexpected("Expected ':' in JSON object");
+        }
+        skipWhitespace(object, position);
+
+        const std::size_t value_start = position;
+        auto value = skipJsonValue(object, position);
         if (!value) {
             return std::unexpected(value.error());
         }
-        if (!value.value()) {
-            return std::unexpected("Missing JSON string member '" + std::string(key) + "'");
+        if (key.value() == wanted_key) {
+            return std::optional<std::string_view>{object.substr(value_start, position - value_start)};
         }
-        return std::move(value.value().value());
+
+        skipWhitespace(object, position);
+        if (position == object.size()) {
+            return std::unexpected("Unterminated JSON object");
+        }
+        const char separator = object[position++];
+        if (separator == '}') {
+            return std::optional<std::string_view>{};
+        }
+        if (separator != ',') {
+            return std::unexpected("Expected ',' in JSON object");
+        }
+        skipWhitespace(object, position);
     }
 
-    // Split a JSON array into views of its original element text.
-    // Example: jsonArrayElements("[1, {\"id\":2}]") returns "1" and "{\"id\":2}".
-    // The views remain valid only while the input array text remains alive.
-    std::expected<std::vector<std::string_view>, std::string>
-    jsonArrayElements(const std::string_view array) {
-        std::size_t position = 0;
-        skipWhitespace(array, position);
-        if (position == array.size() || array[position++] != '[') {
-            return std::unexpected("Expected a JSON array");
-        }
+    return std::unexpected("Unterminated JSON object");
+}
 
-        std::vector<std::string_view> elements;
+// Read an optional string-valued member, decoding JSON escapes when present.
+// Example: jsonStringMember("{\"name\":\"Ada\"}", "name") returns "Ada".
+std::expected<std::optional<std::string>, std::string> jsonStringMember(const std::string_view object,
+                                                                        const std::string_view key) {
+    auto member = findJsonMember(object, key);
+    if (!member) {
+        return std::unexpected(member.error());
+    }
+    const std::optional<std::string_view>& member_json = *member;
+    if (!member_json) {
+        return std::optional<std::string>{};
+    }
+
+    std::size_t position = 0;
+    auto value = parseJsonString(*member_json, position);
+    if (!value) {
+        return std::unexpected("JSON member '" + std::string(key) + "' is not a string");
+    }
+    skipWhitespace(*member_json, position);
+    if (position != member_json->size()) {
+        return std::unexpected("Invalid JSON string member '" + std::string(key) + "'");
+    }
+    return std::optional<std::string>{std::move(value.value())};
+}
+
+// Like jsonStringMember, but report an error when the key is absent.
+std::expected<std::string, std::string> requiredJsonString(const std::string_view object, const std::string_view key) {
+    auto value = jsonStringMember(object, key);
+    if (!value) {
+        return std::unexpected(value.error());
+    }
+    std::optional<std::string>& text = *value;
+    if (!text) {
+        return std::unexpected("Missing JSON string member '" + std::string(key) + "'");
+    }
+    return std::move(*text);
+}
+
+// Split a JSON array into views of its original element text.
+// Example: jsonArrayElements("[1, {\"id\":2}]") returns "1" and "{\"id\":2}".
+// The views remain valid only while the input array text remains alive.
+std::expected<std::vector<std::string_view>, std::string> jsonArrayElements(const std::string_view array) {
+    std::size_t position = 0;
+    skipWhitespace(array, position);
+    if (position == array.size() || array[position] != '[') {
+        return std::unexpected("Expected a JSON array");
+    }
+    ++position;
+
+    std::vector<std::string_view> elements;
+    skipWhitespace(array, position);
+    if (position < array.size() && array[position] == ']') {
+        return elements;
+    }
+
+    while (position < array.size()) {
         skipWhitespace(array, position);
-        if (position < array.size() && array[position] == ']') {
+        const std::size_t start = position;
+        auto value = skipJsonValue(array, position);
+        if (!value) {
+            return std::unexpected(value.error());
+        }
+        elements.push_back(array.substr(start, position - start));
+
+        skipWhitespace(array, position);
+        if (position == array.size()) {
+            return std::unexpected("Unterminated JSON array");
+        }
+        const char separator = array[position++];
+        if (separator == ']') {
+            skipWhitespace(array, position);
+            if (position != array.size()) {
+                return std::unexpected("Unexpected data after JSON array");
+            }
             return elements;
         }
-
-        while (position < array.size()) {
-            skipWhitespace(array, position);
-            const std::size_t start = position;
-            auto value = skipJsonValue(array, position);
-            if (!value) {
-                return std::unexpected(value.error());
-            }
-            elements.push_back(array.substr(start, position - start));
-
-            skipWhitespace(array, position);
-            if (position == array.size()) {
-                return std::unexpected("Unterminated JSON array");
-            }
-            const char separator = array[position++];
-            if (separator == ']') {
-                skipWhitespace(array, position);
-                if (position != array.size()) {
-                    return std::unexpected("Unexpected data after JSON array");
-                }
-                return elements;
-            }
-            if (separator != ',') {
-                return std::unexpected("Expected ',' in JSON array");
-            }
+        if (separator != ',') {
+            return std::unexpected("Expected ',' in JSON array");
         }
-
-        return std::unexpected("Unterminated JSON array");
     }
 
-    // Append a JSON-quoted string, escaping quotes, backslashes, and control bytes.
-    // Example: appending "a\nb" produces "\"a\\nb\"" in the JSON output.
-    void appendJsonString(std::string &json, const std::string_view value) {
-        constexpr char hex[] = "0123456789abcdef";
-        json += '"';
-        for (const unsigned char character : value) {
-            switch (character) {
+    return std::unexpected("Unterminated JSON array");
+}
+
+// Append a JSON-quoted string, escaping quotes, backslashes, and control bytes.
+// Example: appending "a\nb" produces "\"a\\nb\"" in the JSON output.
+void appendJsonString(std::string& json, const std::string_view value) {
+    constexpr std::string_view hex = "0123456789abcdef";
+    json += '"';
+    for (const char byte : value) {
+        const auto character = static_cast<unsigned char>(byte);
+        switch (character) {
             case '"': json += "\\\""; break;
             case '\\': json += "\\\\"; break;
             case '\b': json += "\\b"; break;
@@ -456,43 +494,40 @@ namespace microcodex::json {
                 } else {
                     json += static_cast<char>(character);
                 }
-            }
         }
-        json += '"';
     }
+    json += '"';
+}
 
-
-    // Return a required member as raw JSON text; use string() to decode it if needed.
-    std::expected<std::string_view, std::string>
-    scalarMember(const std::string_view object, const std::string_view name) {
-        auto member = findJsonMember(object, name);
-        if (!member) {
-            return std::unexpected(member.error());
-        }
-        if (!*member) {
-            return std::unexpected("Missing JSON member '" + std::string(name) + "'");
-        }
-        return **member;
+// Return a required member as raw JSON text; use string() to decode it if needed.
+std::expected<std::string_view, std::string> scalarMember(const std::string_view object, const std::string_view name) {
+    auto member = findJsonMember(object, name);
+    if (!member) {
+        return std::unexpected(member.error());
     }
-
-    // Decode a complete JSON string value, rejecting trailing non-whitespace data.
-    // Example: string("\"hello\"") returns "hello".
-    std::expected<std::string, std::string> string(const std::string_view value) {
-        std::size_t position = 0;
-        auto parsed = parseJsonString(value, position);
-        if (!parsed) {
-            return std::unexpected(parsed.error());
-        }
-        skipWhitespace(value, position);
-        if (position != value.size()) {
-            return std::unexpected("Expected a JSON string");
-        }
-        return parsed;
+    const std::optional<std::string_view>& value = *member;
+    if (!value) {
+        return std::unexpected("Missing JSON member '" + std::string(name) + "'");
     }
+    return *value;
+}
 
-    // Compatibility wrapper for appendJsonString.
-    void appendString(std::string &output, const std::string_view value) {
-        appendJsonString(output, value);
+// Decode a complete JSON string value, rejecting trailing non-whitespace data.
+// Example: string("\"hello\"") returns "hello".
+std::expected<std::string, std::string> string(const std::string_view value) {
+    std::size_t position = 0;
+    auto parsed = parseJsonString(value, position);
+    if (!parsed) {
+        return std::unexpected(parsed.error());
     }
+    skipWhitespace(value, position);
+    if (position != value.size()) {
+        return std::unexpected("Expected a JSON string");
+    }
+    return parsed;
+}
 
-} // namespace microcodex::json
+// Compatibility wrapper for appendJsonString.
+void appendString(std::string& output, const std::string_view value) { appendJsonString(output, value); }
+
+}  // namespace microcodex::json

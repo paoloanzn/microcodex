@@ -53,6 +53,7 @@ STDOUT
 STDERR
 
 printf '%064d  microcodex-%s\n' 0 "$launcher_target" > "$launcher_checksum"
+# shellcheck disable=SC2016 # The inner sh -c expands its own arguments.
 expect_process "T6.2: launcher can skip an available update" 0 \
     sh -c 'printf "2\n" | env MICROCODEX_FORCE_UPDATE_CHECK=1 MICROCODEX_RELEASES_URL="file://$2" "$1" beta' \
     launcher-test "$launcher_command" "$launcher_releases" <<'STDOUT' 3<<'STDERR'
@@ -118,6 +119,7 @@ chmod 755 "$MICROCODEX_INSTALL_DIR/microcodex-bin"
 EOF
 launcher_sha256 "$launcher_releases/install.sh" > "$launcher_releases/install.sh.sha256" || exit 1
 
+# shellcheck disable=SC2016 # The inner sh -c expands its own arguments.
 expect_process "T6.5: launcher installs an accepted update before starting" 0 \
     sh -c 'printf "\n" | env MICROCODEX_FORCE_UPDATE_CHECK=1 MICROCODEX_RELEASES_URL="file://$2" "$1" gamma' \
     launcher-test "$launcher_command" "$launcher_releases" <<'STDOUT' 3<<'STDERR'
