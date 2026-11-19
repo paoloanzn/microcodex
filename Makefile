@@ -15,9 +15,10 @@ else
 $(error Unsupported operating system: $(UNAME_S))
 endif
 
-# Warnings for microcodex's own code, the same set Tide uses. Missing field
-# initializers stay allowed: designated initializers deliberately omit members
-# that have defaults. Vendored C sources keep the default -Wall -Wextra.
+# Warnings for microcodex's own code: conversions, shadowing, casts and other
+# common sources of bugs are reported, so they cannot slip in silently. Missing
+# field initializers stay allowed: designated initializers deliberately omit
+# members that have defaults. Vendored C sources keep the default -Wall -Wextra.
 WARNINGS := -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion -Wold-style-cast -Wcast-qual \
 	-Wnon-virtual-dtor -Woverloaded-virtual -Wdouble-promotion -Wformat=2 \
 	-Wimplicit-fallthrough -Wextra-semi -Wredundant-decls -Wmissing-declarations \

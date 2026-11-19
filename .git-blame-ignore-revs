@@ -1,5 +1,5 @@
 # Bulk formatting commits that git blame should skip:
 #   git config blame.ignoreRevsFile .git-blame-ignore-revs
 
-# style: format sources with Tide's clang-format profile
+# Reformat of every source when .clang-format was introduced
 2258c7eb5b9d0ab91100fc5cf083d68bf3d90706

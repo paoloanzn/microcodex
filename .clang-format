@@ -1,4 +1,4 @@
-# Formatting for microcodex sources (clang-format 18), shared with Tide: Google
+# Formatting for microcodex sources, checked in CI with clang-format 18. Google
 # style with a 4-space indent, 120 columns and short single-line bodies.
 ---
 Language: Cpp

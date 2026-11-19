@@ -1,5 +1,5 @@
-# Strict lint profile for microcodex, shared with Tide. Every check family is
-# on; the exclusions below are deliberate and each one is explained.
+# Strict lint profile for microcodex. Every check family is on; the exclusions
+# below are deliberate and each one is explained.
 #
 #   readability-identifier-length         Short names (e, v, i) are idiomatic in
 #                                         the small scopes where they are used.
