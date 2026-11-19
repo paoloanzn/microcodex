@@ -7,6 +7,8 @@
 #include <cstddef>
 #include <expected>
 #include <fstream>
+#include <ios>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -20,11 +22,8 @@ namespace {
 constexpr std::size_t maximum_edit_size = static_cast<std::size_t>(-1);
 
 bool doesFileExist(const std::string& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        return false;
-    }
-    return true;
+    const std::ifstream file(path, std::ios::binary);
+    return !!file;
 }
 
 std::vector<std::size_t> findMatches(const std::string& target, const std::string_view substring) {
@@ -122,7 +121,8 @@ std::vector<microcodex::EditHunk> makeHunks(const std::string& before, const std
             }
         }
 
-        ChangedRange range{old_first, old_last, new_first, new_last};
+        const ChangedRange range{
+            .old_first = old_first, .old_last = old_last, .new_first = new_first, .new_last = new_last};
         if (!ranges.empty() && range.old_first <= ranges.back().old_last && range.new_first <= ranges.back().new_last) {
             ranges.back().old_last = std::max(ranges.back().old_last, range.old_last);
             ranges.back().new_last = std::max(ranges.back().new_last, range.new_last);
@@ -197,7 +197,7 @@ std::expected<EditResult, std::string> edit(const std::string& path, const std::
         content.append(*file_content, cursor, match - cursor);
         const std::size_t new_position = content.size();
         content.append(new_content);
-        positions.push_back({match, new_position});
+        positions.emplace_back(match, new_position);
         cursor = match + old_content.size();
     }
     content.append(*file_content, cursor, std::string::npos);
@@ -215,7 +215,7 @@ std::expected<EditResult, std::string> edit(const std::string& path, const std::
         return std::unexpected("Failed to write to file");
     }
 
-    return EditResult{path, std::move(hunks)};
+    return EditResult{.path = path, .hunks = std::move(hunks)};
 }
 
 }  // namespace microcodex

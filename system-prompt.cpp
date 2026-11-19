@@ -3,6 +3,8 @@
 
 #include "system-prompt.h"
 
+#include <string_view>
+
 namespace microcodex {
 
 std::string_view codingAgentSystemPrompt() {

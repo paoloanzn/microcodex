@@ -4,9 +4,16 @@
 #include "context-compaction.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <expected>
 #include <limits>
+#include <span>
+#include <string>
+#include <string_view>
 #include <utility>
 
+#include "conversation.h"
 #include "response-item.h"
 
 namespace microcodex {
@@ -30,7 +37,7 @@ std::size_t estimatedTokens(const ContextView& context, const std::size_t begin,
 
 }  // namespace
 
-ContextCompactor::ContextCompactor(CompactionConfig config) : config_(std::move(config)) {}
+ContextCompactor::ContextCompactor(CompactionConfig config) : config_(config) {}
 
 bool ContextCompactor::needed(const ContextUsage& usage) const {
     if (config_.compact_at_tokens == 0) return false;
@@ -167,7 +174,7 @@ std::size_t estimateContextTokens(const std::span<const std::string> items) {
     }
     // Code and JSON tend to use more tokens per byte than prose. Three
     // bytes per token is intentionally conservative and avoids a tokenizer.
-    return bytes / 3 + (bytes % 3 != 0);
+    return (bytes / 3) + static_cast<std::size_t>(bytes % 3 != 0);
 }
 
 }  // namespace microcodex

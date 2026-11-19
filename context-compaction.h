@@ -59,10 +59,12 @@ public:
 
     [[nodiscard]] bool needed(const ContextUsage& usage) const;
 
-    std::expected<CompactionPlan, std::string> plan(const ContextView& context, bool retain_recent_turns = true) const;
+    [[nodiscard]] std::expected<CompactionPlan, std::string> plan(const ContextView& context,
+                                                                  bool retain_recent_turns = true) const;
 
-    std::expected<PreparedCompaction, std::string> prepare(const ContextView& context, const CompactionPlan& plan,
-                                                           std::string summary) const;
+    [[nodiscard]] std::expected<PreparedCompaction, std::string> prepare(const ContextView& context,
+                                                                         const CompactionPlan& plan,
+                                                                         std::string summary) const;
 
     [[nodiscard]] std::string_view summaryInstructions() const;
 

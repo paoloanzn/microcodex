@@ -5,10 +5,17 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cstddef>
+#include <expected>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
 #include <vector>
 
+#include "context-compaction.h"
 #include "http.h"
 #include "json.h"
 
@@ -43,7 +50,7 @@ std::expected<std::optional<std::size_t>, std::string> optionalSizeMember(const 
 }
 
 std::size_t percentage(const std::size_t value, const std::size_t percent) {
-    return value / 100 * percent + value % 100 * percent / 100;
+    return (value / 100 * percent) + (value % 100 * percent / 100);
 }
 
 std::expected<std::string, std::string> modelsEndpoint(const std::string_view responses_endpoint) {
@@ -149,8 +156,8 @@ std::expected<std::vector<ModelContextLimits>, std::string> fetchModelContextLim
 
 const ModelContextLimits* findModelContextLimits(const std::span<const ModelContextLimits> models,
                                                  const std::string_view name) noexcept {
-    const auto model = std::find_if(models.begin(), models.end(),
-                                    [name](const ModelContextLimits& candidate) { return candidate.name == name; });
+    const auto model =
+        std::ranges::find_if(models, [name](const ModelContextLimits& candidate) { return candidate.name == name; });
     return model == models.end() ? nullptr : &*model;
 }
 

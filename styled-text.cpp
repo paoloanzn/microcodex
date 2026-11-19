@@ -6,6 +6,11 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
+#include <span>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 namespace microcodex::ui {
 
@@ -138,7 +143,7 @@ std::vector<StyledLine> wrapStyledSpans(const std::span<const StyledSpan> spans,
 
 std::vector<StyledLine> wrapStyledText(const std::string_view text, const int width, const StyledLine& first_template,
                                        const StyledLine& continuation_template, const uintattr_t foreground) {
-    const StyledSpan span{std::string(text), foreground};
+    const StyledSpan span{.text = std::string(text), .foreground = foreground};
     return wrapStyledSpans(std::span<const StyledSpan>(&span, 1), width, first_template, continuation_template);
 }
 

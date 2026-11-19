@@ -122,8 +122,9 @@ private:
                                                                           std::string_view turn_id,
                                                                           std::size_t& turn_start);
     std::expected<CodexApiResponse, std::string> request(std::stop_token stop_token, std::string_view turn_id);
-    std::expected<ModelResponse, std::string> performRequest(std::string request_body, std::stop_token stop_token,
-                                                             std::string_view turn_id, bool emit_events,
+    std::expected<ModelResponse, std::string> performRequest(const std::string& request_body,
+                                                             std::stop_token stop_token, std::string_view turn_id,
+                                                             bool emit_events,
                                                              ModelResponse* partial_response = nullptr) const;
     std::expected<std::string, std::string> requestSummary(std::span<const std::string> items,
                                                            std::stop_token stop_token);
@@ -141,7 +142,7 @@ private:
     std::expected<std::string, std::string> buildRequestBody(std::span<const std::string> items,
                                                              std::string_view instructions, bool include_tools,
                                                              std::string_view final_item = {}) const;
-    void emitEvent(CodexEvent event) const noexcept;
+    void emitEvent(const CodexEvent& event) const noexcept;
 
     CodexApiConfig config_;
     ContextCompactor compactor_;

@@ -3,7 +3,9 @@
 
 #include "bash.h"
 
-#include <poll.h>
+#include <poll.h>    // IWYU pragma: keep
+#include <signal.h>  // NOLINT(modernize-deprecated-headers): POSIX declares kill here.
+#include <stdlib.h>  // NOLINT(modernize-deprecated-headers): POSIX declares mkstemp here.
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -13,6 +15,7 @@
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <expected>
 #include <filesystem>
 #include <optional>
@@ -20,6 +23,7 @@
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <vector>
 
 #include "bash-safety.h"
@@ -107,8 +111,9 @@ microcodex::BashCommandResult runProcess(
         // execvp() returns only on failure. Use the C system call here
         // because C++ streams are not safe after fork in a multithreaded process.
         const char* message = std::strerror(errno);
-        ::write(STDERR_FILENO, message, std::strlen(message));
-        ::write(STDERR_FILENO, "\n", 1);
+        // Nothing can report a failed write from here, so the results are dropped.
+        [[maybe_unused]] const ssize_t message_written = ::write(STDERR_FILENO, message, std::strlen(message));
+        [[maybe_unused]] const ssize_t newline_written = ::write(STDERR_FILENO, "\n", 1);
         _exit(127);
     }
 
@@ -121,7 +126,8 @@ microcodex::BashCommandResult runProcess(
 
     microcodex::BashCommandResult result{};
     std::array<char, 4096> buffer{};
-    pollfd descriptors[2]{{stdout_pipe[0], POLLIN, 0}, {stderr_pipe[0], POLLIN, 0}};
+    pollfd descriptors[2]{{.fd = stdout_pipe[0], .events = POLLIN, .revents = 0},
+                          {.fd = stderr_pipe[0], .events = POLLIN, .revents = 0}};
     int open_streams = 2;
     int status = 0;
     bool child_exited = false;
@@ -291,7 +297,7 @@ public:
         }
     }
 
-    std::vector<std::string> command(const std::string_view script) const {
+    [[nodiscard]] std::vector<std::string> command(const std::string_view script) const {
         if (valid_snapshot_) {
             const std::string snapshot_path = shellSingleQuote(snapshot_.string());
             return {

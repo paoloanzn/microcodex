@@ -83,8 +83,8 @@ public:
 
     std::expected<void, std::string> appendCheckpoint(const CompactionCheckpoint& checkpoint);
 
-    std::expected<std::vector<SavedTurn>, std::string> readTurnsBefore(std::size_t cursor,
-                                                                       std::size_t maximum_bytes) const;
+    [[nodiscard]] std::expected<std::vector<SavedTurn>, std::string> readTurnsBefore(std::size_t cursor,
+                                                                                     std::size_t maximum_bytes) const;
 
     [[nodiscard]] const std::filesystem::path& path() const { return path_; }
     [[nodiscard]] std::size_t turnCount() const { return turn_locations_.size(); }
@@ -99,7 +99,7 @@ private:
     ConversationFile(std::filesystem::path path, int descriptor, std::uint64_t file_size);
 
     std::expected<void, std::string> appendRecord(std::string_view record);
-    std::expected<SavedTurn, std::string> readTurn(const TurnLocation& location) const;
+    [[nodiscard]] std::expected<SavedTurn, std::string> readTurn(const TurnLocation& location) const;
 
     std::filesystem::path path_;
     int descriptor_ = -1;

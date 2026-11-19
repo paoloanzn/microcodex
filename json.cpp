@@ -4,8 +4,14 @@
 #include "json.h"
 
 #include <cctype>
+#include <cstddef>
 #include <cstdint>
+#include <expected>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 namespace microcodex::json {
 
@@ -14,10 +20,12 @@ using JsonMember = std::expected<std::optional<std::string_view>, std::string>;
 // Advance past JSON whitespace so callers can examine the next token.
 // Example: for "  true", starting at 0 leaves position at the 't'.
 void skipWhitespace(const std::string_view json, std::size_t& position) {
-    while (position < json.size() && std::isspace(static_cast<unsigned char>(json[position]))) {
+    while (position < json.size() && (std::isspace(static_cast<unsigned char>(json[position])) != 0)) {
         ++position;
     }
 }
+
+namespace {
 
 int hexDigit(const char character) {
     if (character >= '0' && character <= '9') {
@@ -69,6 +77,8 @@ void appendUtf8(std::string& output, const std::uint32_t code_point) {
     }
 }
 
+}  // namespace
+
 // Parse one quoted JSON string, unescaping characters and Unicode escapes.
 // Example: parsing "\"line\\n\"" returns a string containing line + '\n'.
 // On success position points immediately after the closing quote.
@@ -81,7 +91,7 @@ std::expected<std::string, std::string> parseJsonString(const std::string_view j
     std::string result;
 
     while (position < json.size()) {
-        const unsigned char character = static_cast<unsigned char>(json[position++]);
+        const auto character = static_cast<unsigned char>(json[position++]);
 
         if (character == '"') {
             return result;
@@ -242,7 +252,7 @@ std::expected<void, std::string> skipJsonValue(const std::string_view json, std:
     if (json[position] == '0') {
         ++position;
     } else if (json[position] >= '1' && json[position] <= '9') {
-        while (position < json.size() && std::isdigit(static_cast<unsigned char>(json[position]))) {
+        while (position < json.size() && (std::isdigit(static_cast<unsigned char>(json[position])) != 0)) {
             ++position;
         }
     } else {
@@ -251,7 +261,7 @@ std::expected<void, std::string> skipJsonValue(const std::string_view json, std:
     if (position < json.size() && json[position] == '.') {
         ++position;
         const std::size_t fraction_start = position;
-        while (position < json.size() && std::isdigit(static_cast<unsigned char>(json[position]))) {
+        while (position < json.size() && (std::isdigit(static_cast<unsigned char>(json[position])) != 0)) {
             ++position;
         }
         if (position == fraction_start) {
@@ -264,7 +274,7 @@ std::expected<void, std::string> skipJsonValue(const std::string_view json, std:
             ++position;
         }
         const std::size_t exponent_start = position;
-        while (position < json.size() && std::isdigit(static_cast<unsigned char>(json[position]))) {
+        while (position < json.size() && (std::isdigit(static_cast<unsigned char>(json[position])) != 0)) {
             ++position;
         }
         if (position == exponent_start) {

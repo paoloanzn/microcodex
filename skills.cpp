@@ -6,11 +6,15 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
+#include <ios>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 namespace microcodex {
 
@@ -21,10 +25,10 @@ constexpr std::size_t maximum_skill_entries = 20'000;
 constexpr int maximum_scan_depth = 6;
 
 std::string_view trim(std::string_view value) {
-    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front()))) {
+    while (!value.empty() && (std::isspace(static_cast<unsigned char>(value.front())) != 0)) {
         value.remove_prefix(1);
     }
-    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back()))) {
+    while (!value.empty() && (std::isspace(static_cast<unsigned char>(value.back())) != 0)) {
         value.remove_suffix(1);
     }
     return value;
@@ -81,7 +85,7 @@ std::optional<SkillMetadata> readSkillMetadata(const std::filesystem::path& path
             break;
         }
 
-        const bool indented = !line.empty() && std::isspace(static_cast<unsigned char>(line.front()));
+        const bool indented = !line.empty() && (std::isspace(static_cast<unsigned char>(line.front())) != 0);
         if (folded != nullptr && indented) {
             const std::string_view continuation = trim(line);
             if (!continuation.empty()) {
@@ -118,7 +122,8 @@ std::optional<SkillMetadata> readSkillMetadata(const std::filesystem::path& path
 
     const std::filesystem::path absolute = std::filesystem::absolute(path, error);
     if (error) return std::nullopt;
-    return SkillMetadata{std::move(name), std::move(description), absolute.lexically_normal()};
+    return SkillMetadata{
+        .name = std::move(name), .description = std::move(description), .path = absolute.lexically_normal()};
 }
 
 }  // namespace
@@ -142,7 +147,8 @@ std::vector<SkillMetadata> discoverCodexSkills() {
     std::size_t entries = 0;
     const auto options = std::filesystem::directory_options::follow_directory_symlink |
                          std::filesystem::directory_options::skip_permission_denied;
-    std::filesystem::recursive_directory_iterator iterator(root, options, error), end;
+    std::filesystem::recursive_directory_iterator iterator(root, options, error);
+    std::filesystem::recursive_directory_iterator end;
     while (!error && iterator != end && entries < maximum_skill_entries) {
         ++entries;
         const auto& entry = *iterator;
@@ -156,7 +162,7 @@ std::vector<SkillMetadata> discoverCodexSkills() {
         iterator.increment(error);
     }
 
-    std::sort(skills.begin(), skills.end(), [](const SkillMetadata& left, const SkillMetadata& right) {
+    std::ranges::sort(skills, [](const SkillMetadata& left, const SkillMetadata& right) {
         if (left.name != right.name) return left.name < right.name;
         return left.path < right.path;
     });

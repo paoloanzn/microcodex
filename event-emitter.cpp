@@ -3,6 +3,7 @@
 
 #include "event-emitter.h"
 
+#include <mutex>
 #include <utility>
 
 namespace microcodex {
@@ -10,12 +11,12 @@ namespace microcodex {
 CodexEventEmitter::CodexEventEmitter(CodexEventHandler handler) : handler_(std::move(handler)) {}
 
 void CodexEventEmitter::setHandler(CodexEventHandler handler) {
-    std::lock_guard lock(mutex_);
+    const std::lock_guard lock(mutex_);
     handler_ = std::move(handler);
 }
 
 void CodexEventEmitter::clearHandler() {
-    std::lock_guard lock(mutex_);
+    const std::lock_guard lock(mutex_);
     handler_ = {};
 }
 
@@ -23,7 +24,7 @@ void CodexEventEmitter::emit(const CodexEvent& event) const noexcept {
     try {
         CodexEventHandler handler;
         {
-            std::lock_guard lock(mutex_);
+            const std::lock_guard lock(mutex_);
             handler = handler_;
         }
         if (!handler) {

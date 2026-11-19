@@ -24,7 +24,7 @@ SortIncludes: CaseSensitive
 IncludeCategories:
   - Regex: '^<(arpa|netinet|sys)/.*\.h>$'
     Priority: 2
-  - Regex: '^<(fcntl|glob|poll|signal|spawn|unistd)\.h>$'
+  - Regex: '^<(fcntl|glob|poll|signal|spawn|stdlib|unistd)\.h>$'
     Priority: 2
   - Regex: '^<[a-z_]+>$'
     Priority: 3

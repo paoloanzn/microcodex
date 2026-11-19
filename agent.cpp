@@ -3,6 +3,7 @@
 
 #include "agent.h"
 
+#include <cstddef>
 #include <expected>
 #include <memory>
 #include <stop_token>
@@ -10,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "api.h"
 #include "bash.h"
 #include "edit.h"
 #include "glob.h"
@@ -17,6 +19,7 @@
 #include "read.h"
 #include "skills.h"
 #include "system-prompt.h"
+#include "tool.h"
 #include "write.h"
 
 namespace {
@@ -37,7 +40,7 @@ std::expected<microcodex::ToolResult, std::string> executeRead(
     }
     auto result = callable(*path, *offset, *limit);
     if (!result) return std::unexpected(result.error());
-    return microcodex::ToolResult{std::move(*result), {}};
+    return microcodex::ToolResult{.output = std::move(*result), .edit = {}};
 }
 
 std::expected<microcodex::ToolResult, std::string> executeWrite(
@@ -55,7 +58,7 @@ std::expected<microcodex::ToolResult, std::string> executeWrite(
     if (!result) {
         return std::unexpected(result.error());
     }
-    return microcodex::ToolResult{"Created " + *path, {}};
+    return microcodex::ToolResult{.output = "Created " + *path, .edit = {}};
 }
 
 std::expected<microcodex::ToolResult, std::string> executeEdit(
@@ -80,8 +83,8 @@ std::expected<microcodex::ToolResult, std::string> executeEdit(
         return std::unexpected(result.error());
     }
     return microcodex::ToolResult{
-        "Edited " + *path,
-        std::make_shared<microcodex::EditResult>(std::move(*result)),
+        .output = "Edited " + *path,
+        .edit = std::make_shared<microcodex::EditResult>(std::move(*result)),
     };
 }
 
@@ -97,7 +100,7 @@ std::expected<microcodex::ToolResult, std::string> executeGlob(
     }
     auto result = callable(*pattern);
     if (!result) return std::unexpected(result.error());
-    return microcodex::ToolResult{std::move(*result), {}};
+    return microcodex::ToolResult{.output = std::move(*result), .edit = {}};
 }
 
 std::expected<microcodex::ToolResult, std::string> executeBash(
@@ -117,7 +120,7 @@ std::expected<microcodex::ToolResult, std::string> executeBash(
     output += ",\"stderr\":";
     microcodex::json::appendString(output, result->stderr);
     output += ",\"exit_code\":" + std::to_string(result->error_code) + '}';
-    return microcodex::ToolResult{std::move(output), {}};
+    return microcodex::ToolResult{.output = std::move(output), .edit = {}};
 }
 
 using ReadTool =

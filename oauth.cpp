@@ -15,12 +15,14 @@
 #endif
 #include <curl/curl.h>
 
-#include <arpa/inet.h>
+#include <arpa/inet.h>  // IWYU pragma: keep
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <stdlib.h>  // NOLINT(modernize-deprecated-headers): arc4random_buf is not in <cstdlib>.
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -30,6 +32,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -45,6 +48,15 @@
 #include <utility>
 
 namespace {
+
+// Converts a non-negative wait into the timeval that select() takes. The field
+// types differ between Linux and macOS, so duration_cast picks them up.
+timeval toTimeval(const std::chrono::steady_clock::duration wait) {
+    const auto seconds = std::chrono::duration_cast<std::chrono::duration<decltype(timeval::tv_sec)>>(wait);
+    const auto microseconds =
+        std::chrono::duration_cast<std::chrono::duration<decltype(timeval::tv_usec), std::micro>>(wait - seconds);
+    return {.tv_sec = seconds.count(), .tv_usec = microseconds.count()};
+}
 
 constexpr std::size_t maximum_http_header_size = std::size_t{32} * 1024;
 constexpr std::size_t maximum_token_response_size = std::size_t{1024} * 1024;
@@ -318,7 +330,8 @@ std::expected<BoundListener, SocketError> bindListener(const std::uint16_t port)
     FileDescriptor listener(::socket(AF_INET, SOCK_STREAM, 0));
     if (!listener) {
         const int error = errno;
-        return std::unexpected(SocketError{systemError("Could not create OAuth listener", error), error});
+        return std::unexpected(
+            SocketError{.message = systemError("Could not create OAuth listener", error), .error_number = error});
     }
 
     const int enabled = 1;
@@ -333,19 +346,22 @@ std::expected<BoundListener, SocketError> bindListener(const std::uint16_t port)
     address.sin_port = htons(port);
     if (::bind(listener.get(), reinterpret_cast<const sockaddr*>(&address), sizeof(address)) < 0) {
         const int error = errno;
-        return std::unexpected(SocketError{systemError("Could not bind OAuth listener", error), error});
+        return std::unexpected(
+            SocketError{.message = systemError("Could not bind OAuth listener", error), .error_number = error});
     }
     if (::listen(listener.get(), 4) < 0) {
         const int error = errno;
-        return std::unexpected(SocketError{systemError("Could not listen for OAuth callback", error), error});
+        return std::unexpected(
+            SocketError{.message = systemError("Could not listen for OAuth callback", error), .error_number = error});
     }
 
     socklen_t address_size = sizeof(address);
     if (::getsockname(listener.get(), reinterpret_cast<sockaddr*>(&address), &address_size) < 0) {
         const int error = errno;
-        return std::unexpected(SocketError{systemError("Could not determine OAuth callback port", error), error});
+        return std::unexpected(SocketError{.message = systemError("Could not determine OAuth callback port", error),
+                                           .error_number = error});
     }
-    return BoundListener{std::move(listener), ntohs(address.sin_port)};
+    return BoundListener{.socket = std::move(listener), .port = ntohs(address.sin_port)};
 }
 
 // select() lets the entire login attempt share one absolute deadline. EINTR
@@ -358,9 +374,7 @@ std::expected<FileDescriptor, std::string> acceptBefore(const int listener,
             return std::unexpected("Timed out waiting for the OAuth browser callback");
         }
 
-        const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(deadline - now);
-        timeval timeout{static_cast<time_t>(remaining.count() / 1'000'000),
-                        static_cast<suseconds_t>(remaining.count() % 1'000'000)};
+        timeval timeout = toTimeval(deadline - now);
         fd_set readable;
         FD_ZERO(&readable);
         FD_SET(listener, &readable);
@@ -402,9 +416,7 @@ std::expected<std::string, std::string> readHttpRequest(const int connection,
         if (now >= deadline) {
             return std::unexpected("Timed out reading the OAuth browser callback");
         }
-        const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(deadline - now);
-        timeval timeout{static_cast<time_t>(remaining.count() / 1'000'000),
-                        static_cast<suseconds_t>(remaining.count() % 1'000'000)};
+        timeval timeout = toTimeval(deadline - now);
         fd_set readable;
         FD_ZERO(&readable);
         FD_SET(connection, &readable);
@@ -455,8 +467,8 @@ std::expected<HttpRequestLine, std::string> parseHttpRequestLine(const std::stri
         !line.substr(second_space + 1).starts_with("HTTP/")) {
         return std::unexpected("Malformed OAuth callback request line");
     }
-    return HttpRequestLine{std::string(line.substr(0, first_space)),
-                           std::string(line.substr(first_space + 1, second_space - first_space - 1))};
+    return HttpRequestLine{.method = std::string(line.substr(0, first_space)),
+                           .target = std::string(line.substr(first_space + 1, second_space - first_space - 1))};
 }
 
 // Always close the connection so browser keep-alive cannot leave the login
@@ -535,7 +547,7 @@ std::expected<HttpResponse, std::string> postBody(const std::string& url, const 
     if (raw_headers == nullptr) {
         return std::unexpected("Could not allocate OAuth request headers");
     }
-    std::unique_ptr<curl_slist, decltype(&curl_slist_free_all)> headers(raw_headers, &curl_slist_free_all);
+    const std::unique_ptr<curl_slist, decltype(&curl_slist_free_all)> headers(raw_headers, &curl_slist_free_all);
 
     const auto setOption = [&curl](const CURLoption option, const auto value) {
         return curl_easy_setopt(curl.get(), option, value) == CURLE_OK;
@@ -658,8 +670,10 @@ std::expected<microcodex::OAuthCredentials, std::string> exchangeAuthorizationCo
     if (!account_id) {
         return std::unexpected(account_id.error());
     }
-    return microcodex::OAuthCredentials{std::move(access_token.value()), std::move(account_id.value()),
-                                        std::move(id_token.value()), std::move(refresh_token.value())};
+    return microcodex::OAuthCredentials{.access_token = std::move(access_token.value()),
+                                        .account_id = std::move(account_id.value()),
+                                        .id_token = std::move(id_token.value()),
+                                        .refresh_token = std::move(refresh_token.value())};
 }
 
 std::expected<void, std::string> validateOAuthOptions(const microcodex::OAuthOptions& options) {
@@ -822,7 +836,7 @@ std::expected<void, std::string> writeFileAtomically(const std::filesystem::path
 // auth.json should be tiny. Bound reads even when the file changes after
 // fstat(), so a corrupted or hostile file cannot allocate unlimited memory.
 std::expected<std::optional<std::string>, std::string> readSmallFile(const std::filesystem::path& path) {
-    FileDescriptor file(::open(path.c_str(), O_RDONLY));
+    const FileDescriptor file(::open(path.c_str(), O_RDONLY));
     if (!file) {
         if (errno == ENOENT) {
             return std::optional<std::string>{};
@@ -907,8 +921,11 @@ std::expected<OAuthDeviceCode, std::string> startOAuthDeviceLogin(OAuthOptions o
         return std::unexpected(interval.error());
     }
 
-    return OAuthDeviceCode{options.issuer + "/codex/device", std::move(*user_code), std::move(*device_auth_id),
-                           *interval, std::move(options)};
+    return OAuthDeviceCode{.verification_url = options.issuer + "/codex/device",
+                           .user_code = std::move(*user_code),
+                           .device_auth_id = std::move(*device_auth_id),
+                           .interval = *interval,
+                           .options = std::move(options)};
 }
 
 // Wait for the browser-side authorization, then feed the returned code and
@@ -1177,8 +1194,10 @@ std::expected<std::optional<OAuthCredentials>, std::string> loadOAuthCredentials
         return std::unexpected("Could not parse OAuth credentials account ID: " + account.error());
     }
 
-    OAuthCredentials credentials{std::move(access_token.value()), account.value().value_or(std::string{}),
-                                 std::move(id_token.value()), std::move(refresh_token.value())};
+    OAuthCredentials credentials{.access_token = std::move(access_token.value()),
+                                 .account_id = account.value().value_or(std::string{}),
+                                 .id_token = std::move(id_token.value()),
+                                 .refresh_token = std::move(refresh_token.value())};
     auto validation = validateCredentials(credentials);
     if (!validation) {
         return std::unexpected(validation.error());
@@ -1245,7 +1264,7 @@ std::expected<OAuthCredentials, std::string> refreshOAuthCredentials(const OAuth
 
     std::string body = "{\"client_id\":";
     json::appendJsonString(body, options.client_id);
-    body += ",\"grant_type\":\"refresh_token\",\"refresh_token\":";
+    body += R"(,"grant_type":"refresh_token","refresh_token":)";
     json::appendJsonString(body, credentials.refresh_token);
     body += '}';
     auto response = postBody(options.issuer + "/oauth/token", body, "Content-Type: application/json",

@@ -3,16 +3,19 @@
 
 #include "markdown.h"
 
+#include <md4c.h>
+
 #include <algorithm>
 #include <cstddef>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 #include "shell-highlight.h"
-#include "vendor/md4c/src/md4c.h"
+#include "styled-text.h"
 
 namespace {
 
@@ -36,7 +39,7 @@ constexpr uintattr_t color_mask = 0x00ff;
 uintattr_t mergeStyle(const uintattr_t base, const uintattr_t overlay) {
     const uintattr_t overlay_color = overlay & color_mask;
     const uintattr_t color = overlay_color != 0 ? overlay_color : base & color_mask;
-    const uintattr_t attributes = (base | overlay) & ~color_mask;
+    const uintattr_t attributes = (base | overlay) & static_cast<uintattr_t>(~color_mask);
     return color | attributes;
 }
 
@@ -206,7 +209,7 @@ private:
         }
     }
 
-    void leaveBlock(const MD_BLOCKTYPE type, void*) {
+    void leaveBlock(const MD_BLOCKTYPE type, void* /*unused*/) {
         switch (type) {
             case MD_BLOCK_QUOTE:
                 if (quote_depth_ > 0) {
@@ -252,7 +255,7 @@ private:
         }
     }
 
-    void enterSpan(const MD_SPANTYPE type, void*) {
+    void enterSpan(const MD_SPANTYPE type, void* /*unused*/) {
         inline_styles_.push_back(spanStyle(type));
         if (type == MD_SPAN_IMG) {
             ensureTextBlock();
@@ -260,7 +263,7 @@ private:
         }
     }
 
-    void leaveSpan(const MD_SPANTYPE type, void*) {
+    void leaveSpan(const MD_SPANTYPE type, void* /*unused*/) {
         if (type == MD_SPAN_IMG) {
             appendCurrent("]");
         }
@@ -334,7 +337,7 @@ private:
         continuation_prefix_ = std::move(continuation);
     }
 
-    std::pair<StyledLine, StyledLine> quotePrefixes() const {
+    [[nodiscard]] std::pair<StyledLine, StyledLine> quotePrefixes() const {
         StyledLine first;
         StyledLine continuation;
         for (std::size_t depth = 0; depth < quote_depth_; ++depth) {
@@ -395,15 +398,15 @@ private:
     void appendCurrent(const std::string_view text) {
         if (table_ && text.find_first_of("\r\n") != std::string_view::npos) {
             std::string flattened(text);
-            std::replace(flattened.begin(), flattened.end(), '\r', ' ');
-            std::replace(flattened.begin(), flattened.end(), '\n', ' ');
+            std::ranges::replace(flattened, '\r', ' ');
+            std::ranges::replace(flattened, '\n', ' ');
             appendSpan(current_, flattened, currentStyle());
         } else {
             appendSpan(current_, text, currentStyle());
         }
     }
 
-    uintattr_t currentStyle() const {
+    [[nodiscard]] uintattr_t currentStyle() const {
         uintattr_t style = block_style_;
         for (const uintattr_t inline_style : inline_styles_) {
             style = mergeStyle(style, inline_style);
@@ -411,7 +414,7 @@ private:
         return style;
     }
 
-    uintattr_t spanStyle(const MD_SPANTYPE type) const {
+    [[nodiscard]] uintattr_t spanStyle(const MD_SPANTYPE type) const {
         switch (type) {
             case MD_SPAN_EM: return TB_ITALIC;
             case MD_SPAN_STRONG: return TB_BOLD;
@@ -439,13 +442,13 @@ private:
             lines_.push_back(std::move(language));
         }
 
-        StyledLine first = lineWithPrefix({{"  ", muted_color}}, code_background, true);
-        StyledLine continuation = first;
+        const StyledLine first = lineWithPrefix({{.text = "  ", .foreground = muted_color}}, code_background, true);
+        const StyledLine& continuation = first;
         if (isShellLanguage(code_language_)) {
             const std::vector<StyledSpan> highlighted = highlightShell(code_);
             appendLines(lines_, wrapStyledSpans(highlighted, width_, first, continuation));
         } else {
-            const StyledSpan code_span{code_, code_color};
+            const StyledSpan code_span{.text = code_, .foreground = code_color};
             appendLines(lines_,
                         wrapStyledSpans(std::span<const StyledSpan>(&code_span, 1), width_, first, continuation));
         }
@@ -476,7 +479,7 @@ private:
         }
     }
 
-    std::vector<std::size_t> tableWidths(const std::vector<TableState::Row>& rows) const {
+    [[nodiscard]] std::vector<std::size_t> tableWidths(const std::vector<TableState::Row>& rows) const {
         std::size_t columns = 0;
         for (const TableState::Row& row : rows) {
             columns = std::max(columns, row.size());
@@ -543,7 +546,8 @@ private:
                 for (const StyledSpan& span : row[column]) {
                     appendSpan(content, span.text, span.foreground);
                 }
-                appendLines(lines_, wrapStyledSpans(content.spans, width_, {}, lineWithPrefix({{"  ", TB_DEFAULT}})));
+                appendLines(lines_, wrapStyledSpans(content.spans, width_, {},
+                                                    lineWithPrefix({{.text = "  ", .foreground = TB_DEFAULT}})));
             }
             if (row_index + 1 < rows.size()) {
                 appendBlankLine();
@@ -571,7 +575,7 @@ private:
         }
     }
 
-    std::vector<StyledLine> plainFallback(const std::string_view source) const {
+    [[nodiscard]] std::vector<StyledLine> plainFallback(const std::string_view source) const {
         return wrapStyledText(source, width_, {}, {});
     }
 

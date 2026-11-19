@@ -11,10 +11,13 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 
 #include "agent.h"
+#include "api.h"
 #include "conversation.h"
+#include "event-emitter.h"
 #include "model-catalog.h"
 #include "oauth.h"
 #include "response-item.h"

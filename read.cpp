@@ -30,12 +30,12 @@ std::expected<std::string, std::string> read(const std::string& path, size_t off
         return std::unexpected("Could not get file size");
     }
 
-    size_t size = static_cast<size_t>(stream_size);
+    const auto size = static_cast<size_t>(stream_size);
     if (offset > size) {
         return std::unexpected("Offset is beyond file size");
     }
 
-    file.seekg(offset, std::ios::beg);
+    file.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
     if (!file) {
         return std::unexpected("Could not seek in file");
     }

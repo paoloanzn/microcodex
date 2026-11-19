@@ -10,23 +10,31 @@
 #include <chrono>
 #include <cstddef>
 #include <ctime>
+#include <exception>
 #include <expected>
 #include <filesystem>
 #include <future>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <random>
+#include <span>
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include "context-compaction.h"
+#include "conversation.h"
+#include "event-emitter.h"
 #include "http.h"
 #include "json.h"
 #include "response-item.h"
+#include "tool.h"
 
 namespace {
 
@@ -297,7 +305,7 @@ std::expected<void, std::string> finishEvent(StreamState& state) {
     if (state.event_data.empty()) {
         return {};
     }
-    std::string data = std::move(state.event_data);
+    const std::string data = std::move(state.event_data);
     state.event_data.clear();
     return handleEvent(data, state);
 }
@@ -352,10 +360,10 @@ std::expected<void, std::string> receiveResponseBody(const std::string_view data
 }
 
 std::string trim(std::string_view value) {
-    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front()))) {
+    while (!value.empty() && (std::isspace(static_cast<unsigned char>(value.front())) != 0)) {
         value.remove_prefix(1);
     }
-    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back()))) {
+    while (!value.empty() && (std::isspace(static_cast<unsigned char>(value.back())) != 0)) {
         value.remove_suffix(1);
     }
     return std::string(value);
@@ -410,7 +418,7 @@ public:
     RunningTurnGuard& operator=(const RunningTurnGuard&) = delete;
 
     ~RunningTurnGuard() {
-        std::lock_guard lock(mutex_);
+        const std::lock_guard lock(mutex_);
         stop_source_.reset();
         running_ = false;
     }
@@ -436,7 +444,7 @@ CodexApi::CodexApi(CodexApiConfig config, CodexEventEmitter& events) : CodexApi(
 }
 
 std::expected<void, std::string> CodexApi::initializeConversation() {
-    std::lock_guard lock(turn_mutex_);
+    const std::lock_guard lock(turn_mutex_);
     if (conversation_initialized_) return {};
     if (turn_running_) {
         return std::unexpected("Cannot initialize a conversation while a turn is running");
@@ -457,7 +465,7 @@ std::expected<void, std::string> CodexApi::initializeConversation() {
         completed_turns_ = std::move(resumed->completed_turns);
         has_summary_ = resumed->has_summary;
         compaction_generation_ = resumed->compaction_generation;
-        turn_number_ = static_cast<std::size_t>(resumed->next_turn_number - 1);
+        turn_number_ = resumed->next_turn_number - 1;
         conversation_file_.emplace(std::move(*file));
         conversation_initialized_ = true;
         return {};
@@ -470,7 +478,7 @@ std::expected<void, std::string> CodexApi::initializeConversation() {
     if (error) {
         return std::unexpected("Could not determine the working directory: " + error.message());
     }
-    ConversationMetadata metadata{
+    const ConversationMetadata metadata{
         .version = 1,
         .id = session_id_,
         .created_at = currentTimestamp(),
@@ -491,9 +499,9 @@ std::expected<CodexApiResponse, std::string> CodexApi::sendUserMessage(const std
     auto initialized = initializeConversation();
     if (!initialized) return std::unexpected(initialized.error());
 
-    std::stop_source turn_stop;
+    const std::stop_source turn_stop;
     {
-        std::lock_guard lock(turn_mutex_);
+        const std::lock_guard lock(turn_mutex_);
         if (shutdown_requested_) {
             return std::unexpected("CodexApi has been shut down");
         }
@@ -503,7 +511,7 @@ std::expected<CodexApiResponse, std::string> CodexApi::sendUserMessage(const std
         turn_running_ = true;
         active_turn_stop_ = turn_stop;
     }
-    RunningTurnGuard running_turn(turn_mutex_, turn_running_, active_turn_stop_);
+    const RunningTurnGuard running_turn(turn_mutex_, turn_running_, active_turn_stop_);
 
     const std::size_t previous_turn = turn_number_;
     const std::string previous_turn_state = turn_state_;
@@ -637,14 +645,14 @@ std::expected<CodexApiResponse, std::string> CodexApi::sendUserMessage(const std
 }
 
 void CodexApi::interrupt() noexcept {
-    std::lock_guard lock(turn_mutex_);
+    const std::lock_guard lock(turn_mutex_);
     if (active_turn_stop_) {
         active_turn_stop_->request_stop();
     }
 }
 
 std::expected<void, std::string> CodexApi::resetConversation() {
-    std::lock_guard lock(turn_mutex_);
+    const std::lock_guard lock(turn_mutex_);
     if (turn_running_) {
         return std::unexpected("Cannot reset the conversation while a turn is running");
     }
@@ -667,7 +675,7 @@ std::expected<void, std::string> CodexApi::resetConversation() {
 }
 
 void CodexApi::shutdown() noexcept {
-    std::lock_guard lock(turn_mutex_);
+    const std::lock_guard lock(turn_mutex_);
     shutdown_requested_ = true;
     if (active_turn_stop_) {
         active_turn_stop_->request_stop();
@@ -675,13 +683,13 @@ void CodexApi::shutdown() noexcept {
 }
 
 bool CodexApi::turnInProgress() const noexcept {
-    std::lock_guard lock(turn_mutex_);
+    const std::lock_guard lock(turn_mutex_);
     return turn_running_;
 }
 
 std::expected<std::vector<SavedTurn>, std::string> CodexApi::readHistoryBefore(const std::size_t cursor,
                                                                                const std::size_t maximum_bytes) const {
-    std::lock_guard lock(turn_mutex_);
+    const std::lock_guard lock(turn_mutex_);
     if (turn_running_) {
         return std::unexpected("Cannot read saved history while a turn is running");
     }
@@ -690,7 +698,7 @@ std::expected<std::vector<SavedTurn>, std::string> CodexApi::readHistoryBefore(c
 }
 
 std::size_t CodexApi::savedTurnCount() const {
-    std::lock_guard lock(turn_mutex_);
+    const std::lock_guard lock(turn_mutex_);
     return conversation_file_ ? conversation_file_->turnCount() : 0;
 }
 
@@ -769,13 +777,13 @@ std::expected<std::string, std::string> CodexApi::buildRequestBody(const std::sp
     body += ']';
 
     if (include_tools) {
-        body += ",\"tool_choice\":\"auto\",\"parallel_tool_calls\":true";
+        body += R"(,"tool_choice":"auto","parallel_tool_calls":true)";
     }
-    body += ",\"reasoning\":{\"effort\":";
+    body += R"(,"reasoning":{"effort":)";
     appendJsonString(body, wireReasoningEffort(config_.reasoning_effort));
-    body += "},\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"prompt_cache_key\":";
+    body += R"(},"store":false,"stream":true,"include":["reasoning.encrypted_content"],"prompt_cache_key":)";
     appendJsonString(body, session_id_);
-    body += ",\"client_metadata\":{\"x-codex-installation-id\":";
+    body += R"(,"client_metadata":{"x-codex-installation-id":)";
     appendJsonString(body, installation_id_);
     body += ",\"session_id\":";
     appendJsonString(body, session_id_);
@@ -792,28 +800,39 @@ CodexApi::ToolExecutionResult CodexApi::executeToolCall(const std::span<const st
                                                         const std::size_t maximum_output_bytes) {
     try {
         if (stop_token.stop_requested()) {
-            return {{call.call_id, "Error: Tool execution interrupted"}, {}, false};
+            return {.output = {.call_id = call.call_id, .output = "Error: Tool execution interrupted"},
+                    .edit = {},
+                    .succeeded = false};
         }
 
-        const auto tool = std::find_if(tools.begin(), tools.end(), [&call](const auto& candidate) {
-            return candidate != nullptr && candidate->name() == call.name;
-        });
+        const auto tool = std::ranges::find_if(
+            tools, [&call](const auto& candidate) { return candidate != nullptr && candidate->name() == call.name; });
         auto result = tool == tools.end()
                           ? std::expected<ToolResult, std::string>(std::unexpected("Unknown tool '" + call.name + "'"))
                           : (*tool)->executeJson(call.arguments, stop_token);
         if (stop_token.stop_requested()) {
-            return {{call.call_id, "Error: Tool execution interrupted"}, {}, false};
+            return {.output = {.call_id = call.call_id, .output = "Error: Tool execution interrupted"},
+                    .edit = {},
+                    .succeeded = false};
         }
         if (!result) {
-            return {{call.call_id, "Error: " + result.error()}, {}, false};
+            return {.output = {.call_id = call.call_id, .output = "Error: " + result.error()},
+                    .edit = {},
+                    .succeeded = false};
         }
-        return {{call.call_id, boundedToolOutput(std::move(result->output), maximum_output_bytes)},
-                std::move(result->edit),
-                true};
+        return {.output = {.call_id = call.call_id,
+                           .output = boundedToolOutput(std::move(result->output), maximum_output_bytes)},
+                .edit = std::move(result->edit),
+                .succeeded = true};
     } catch (const std::exception& error) {
-        return {{call.call_id, std::string("Error: Tool threw an exception: ") + error.what()}, {}, false};
+        return {.output = {.call_id = call.call_id,
+                           .output = std::string("Error: Tool threw an exception: ") + error.what()},
+                .edit = {},
+                .succeeded = false};
     } catch (...) {
-        return {{call.call_id, "Error: Tool threw an unknown exception"}, {}, false};
+        return {.output = {.call_id = call.call_id, .output = "Error: Tool threw an unknown exception"},
+                .edit = {},
+                .succeeded = false};
     }
 }
 
@@ -846,11 +865,11 @@ std::expected<std::vector<CodexApi::ToolExecutionResult>, std::string> CodexApi:
         // Anchors the task's timeout deadline: with several stuck tools,
         // waiting a fresh `timeout` per task would let the turn take up to
         // N x timeout, so each task waits only until its own deadline.
-        std::chrono::steady_clock::time_point start_time{};
+        std::chrono::steady_clock::time_point start_time;
         // Set when the task is stopped for timing out. Overdue tasks are
         // stopped together and share one grace period, so a batch of stuck
         // tools cannot stack their grace periods either.
-        std::chrono::steady_clock::time_point grace_deadline{};
+        std::chrono::steady_clock::time_point grace_deadline;
     };
     std::vector<ToolTask> tasks;
     tasks.reserve(calls.size());
@@ -921,10 +940,11 @@ std::expected<std::vector<CodexApi::ToolExecutionResult>, std::string> CodexApi:
                     }
                 }
             }
-            result = {{calls[index].call_id, "Error: Tool execution timed out after " +
-                                                 std::to_string(config_.tool_execution_timeout_seconds) + " seconds"},
-                      {},
-                      false};
+            result = {.output = {.call_id = calls[index].call_id,
+                                 .output = "Error: Tool execution timed out after " +
+                                           std::to_string(config_.tool_execution_timeout_seconds) + " seconds"},
+                      .edit = {},
+                      .succeeded = false};
             // Give a cooperative tool a brief grace period to observe the
             // stop and exit (the bash tool kills its child process on
             // stop). A tool that ignores the stop is left to a detached
@@ -949,9 +969,14 @@ std::expected<std::vector<CodexApi::ToolExecutionResult>, std::string> CodexApi:
                 // their actual execution.
                 result = tasks[index].future.get();
             } catch (const std::exception& error) {
-                result = {{calls[index].call_id, std::string("Error: Tool task failed: ") + error.what()}, {}, false};
+                result = {.output = {.call_id = calls[index].call_id,
+                                     .output = std::string("Error: Tool task failed: ") + error.what()},
+                          .edit = {},
+                          .succeeded = false};
             } catch (...) {
-                result = {{calls[index].call_id, "Error: Tool task failed"}, {}, false};
+                result = {.output = {.call_id = calls[index].call_id, .output = "Error: Tool task failed"},
+                          .edit = {},
+                          .succeeded = false};
             }
         }
 
@@ -1007,8 +1032,9 @@ std::expected<CodexApiResponse, std::string> CodexApi::requestWithToolExecution(
             // turn remains valid input for a later continuation.
             for (const CodexToolCall& call : response->tool_calls) {
                 input_items_.push_back(toolOutputItem({
-                    call.call_id,
-                    "Error: Tool call was not executed because Codex exceeded the maximum number of tool rounds",
+                    .call_id = call.call_id,
+                    .output =
+                        "Error: Tool call was not executed because Codex exceeded the maximum number of tool rounds",
                 }));
             }
             return std::unexpected(std::string(tool_round_limit_error));
@@ -1071,7 +1097,7 @@ std::expected<CodexApiResponse, std::string> CodexApi::request(const std::stop_t
     return std::move(sampled->response);
 }
 
-std::expected<CodexApi::ModelResponse, std::string> CodexApi::performRequest(std::string request_body,
+std::expected<CodexApi::ModelResponse, std::string> CodexApi::performRequest(const std::string& request_body,
                                                                              const std::stop_token stop_token,
                                                                              const std::string_view turn_id,
                                                                              const bool emit_events,
@@ -1212,7 +1238,7 @@ std::expected<void, std::string> CodexApi::compactContext(const std::stop_token 
     return {};
 }
 
-void CodexApi::emitEvent(CodexEvent event) const noexcept {
+void CodexApi::emitEvent(const CodexEvent& event) const noexcept {
     if (events_ != nullptr) {
         events_->emit(event);
     }

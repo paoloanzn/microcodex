@@ -19,7 +19,7 @@ int extractMetaComposerKey(tb_event* event, std::size_t* consumed) {
         return TB_ERR;
     }
 
-    const unsigned char key = static_cast<unsigned char>(global.in.buf[1]);
+    const auto key = static_cast<unsigned char>(global.in.buf[1]);
     if (key != 'b' && key != 'B' && key != 'f' && key != 'F' && key != TB_KEY_BACKSPACE && key != TB_KEY_BACKSPACE2) {
         return TB_ERR;
     }

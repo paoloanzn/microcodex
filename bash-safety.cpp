@@ -4,7 +4,9 @@
 #include "bash-safety.h"
 
 #include <array>
+#include <optional>
 #include <regex>
+#include <string_view>
 
 namespace {
 
@@ -15,39 +17,44 @@ struct DeniedCommandPattern {
 
 const std::array<DeniedCommandPattern, 5> deniedCommandPatterns{{
     {
-        std::regex{
-            R"((^|[[:space:];|&()])([^[:space:];|&()]+/)?rm[[:space:]]+([^;|&\n]*[[:space:]])?(--force|-[[:alpha:]]*f[[:alpha:]]*)($|[[:space:];|&]))",
-            std::regex::extended | std::regex::icase,
-        },
-        "forced file removal is blocked",
+        .pattern =
+            std::regex{
+                R"((^|[[:space:];|&()])([^[:space:];|&()]+/)?rm[[:space:]]+([^;|&\n]*[[:space:]])?(--force|-[[:alpha:]]*f[[:alpha:]]*)($|[[:space:];|&]))",
+                std::regex::extended | std::regex::icase,
+            },
+        .reason = "forced file removal is blocked",
     },
     {
-        std::regex{
-            R"((^|[[:space:];|&()])git[[:space:]]+reset[[:space:]]+([^;|&\n]*[[:space:]])?--hard($|[[:space:];|&]))",
-            std::regex::extended | std::regex::icase,
-        },
-        "git reset --hard is blocked",
+        .pattern =
+            std::regex{
+                R"((^|[[:space:];|&()])git[[:space:]]+reset[[:space:]]+([^;|&\n]*[[:space:]])?--hard($|[[:space:];|&]))",
+                std::regex::extended | std::regex::icase,
+            },
+        .reason = "git reset --hard is blocked",
     },
     {
-        std::regex{
-            R"((^|[[:space:];|&()])git[[:space:]]+clean[[:space:]]+([^;|&\n]*[[:space:]])?(-[[:alpha:]]*f[[:alpha:]]*|--force)($|[[:space:];|&]))",
-            std::regex::extended | std::regex::icase,
-        },
-        "forced git clean is blocked",
+        .pattern =
+            std::regex{
+                R"((^|[[:space:];|&()])git[[:space:]]+clean[[:space:]]+([^;|&\n]*[[:space:]])?(-[[:alpha:]]*f[[:alpha:]]*|--force)($|[[:space:];|&]))",
+                std::regex::extended | std::regex::icase,
+            },
+        .reason = "forced git clean is blocked",
     },
     {
-        std::regex{
-            R"((^|[[:space:];|&()])git[[:space:]]+checkout[[:space:]]+--($|[[:space:];|&]))",
-            std::regex::extended | std::regex::icase,
-        },
-        "git checkout -- is blocked",
+        .pattern =
+            std::regex{
+                R"((^|[[:space:];|&()])git[[:space:]]+checkout[[:space:]]+--($|[[:space:];|&]))",
+                std::regex::extended | std::regex::icase,
+            },
+        .reason = "git checkout -- is blocked",
     },
     {
-        std::regex{
-            R"((^|[[:space:];|&()])(mkfs(\.[[:alnum:]_-]+)?|fdisk|parted|shutdown|reboot|halt|poweroff)($|[[:space:];|&]))",
-            std::regex::extended | std::regex::icase,
-        },
-        "system or disk destructive command is blocked",
+        .pattern =
+            std::regex{
+                R"((^|[[:space:];|&()])(mkfs(\.[[:alnum:]_-]+)?|fdisk|parted|shutdown|reboot|halt|poweroff)($|[[:space:];|&]))",
+                std::regex::extended | std::regex::icase,
+            },
+        .reason = "system or disk destructive command is blocked",
     },
 }};
 

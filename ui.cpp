@@ -5,22 +5,31 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <deque>
 #include <exception>
+#include <expected>
 #include <future>
 #include <initializer_list>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
+#include "api.h"
+#include "conversation.h"
+#include "edit.h"
+#include "event-emitter.h"
 #include "markdown.h"
+#include "response-item.h"
 #include "shell-highlight.h"
 #include "styled-text.h"
 #include "terminal.h"
@@ -97,7 +106,7 @@ struct UiState {
     std::size_t input_cursor = 0;
     std::size_t transcript_bytes = 0;
     std::size_t scroll = 0;
-    std::chrono::steady_clock::time_point turn_started_at{};
+    std::chrono::steady_clock::time_point turn_started_at;
     int working_row = -1;
     bool tool_output_expanded = false;
     bool pasting = false;
@@ -131,7 +140,7 @@ public:
                 .succeeded = event.succeeded,
             };
 
-            std::lock_guard lock(mutex_);
+            const std::lock_guard lock(mutex_);
             if (copy.type == microcodex::CodexEventType::TextDelta && !events_.empty() &&
                 events_.back().type == microcodex::CodexEventType::TextDelta &&
                 events_.back().turn_id == copy.turn_id) {
@@ -151,7 +160,7 @@ public:
 
     std::vector<microcodex::CodexEvent> take() {
         std::vector<microcodex::CodexEvent> result;
-        std::lock_guard lock(mutex_);
+        const std::lock_guard lock(mutex_);
         result.swap(events_);
         return result;
     }
@@ -229,9 +238,9 @@ void appendEntryText(UiState& state, UiEntry& entry, const std::string_view text
 }
 
 UiEntry* findToolEntry(UiState& state, const std::string_view call_id) {
-    for (auto entry = state.transcript.rbegin(); entry != state.transcript.rend(); ++entry) {
-        if (entry->kind == EntryKind::Tool && entry->call_id == call_id) {
-            return &*entry;
+    for (auto& entry : std::ranges::reverse_view(state.transcript)) {
+        if (entry.kind == EntryKind::Tool && entry.call_id == call_id) {
+            return &entry;
         }
     }
     return nullptr;
@@ -645,8 +654,8 @@ void insertPaste(UiState& state) {
             state.paste[position++] = '\n';
         }
     }
-    const std::size_t character_count = std::count_if(state.paste.begin(), state.paste.end(),
-                                                      [](const unsigned char byte) { return (byte & 0xc0) != 0x80; });
+    const auto character_count = static_cast<std::size_t>(
+        std::ranges::count_if(state.paste, [](const unsigned char byte) { return (byte & 0xc0) != 0x80; }));
     std::string displayed;
     if (character_count > large_paste_character_threshold || pasteNeedsSafeDisplay(state.paste)) {
         const std::string base = "[Pasted Content " + std::to_string(character_count) + " chars]";
@@ -773,7 +782,7 @@ std::vector<StyledLine> collapseToolOutput(std::vector<StyledLine> output_lines)
         collapsed.push_back(std::move(output_lines[index]));
     }
 
-    StyledLine omission = lineWithPrefix({{"    ", faint_foreground}});
+    StyledLine omission = lineWithPrefix({{.text = "    ", .foreground = faint_foreground}});
     appendSpan(omission, "… +" + std::to_string(omitted_rows) + " lines (ctrl + t to view full output)",
                muted_foreground | TB_DIM);
     collapsed.push_back(std::move(omission));
@@ -816,14 +825,14 @@ void appendDiffLine(std::vector<StyledLine>& lines, const std::string_view text,
     const uintattr_t background = added ? added_background : removed ? removed_background : TB_DEFAULT;
     const StyledLine first = lineWithPrefix(
         {
-            {"    ", TB_DEFAULT},
-            {paddedLineNumber(number, number_width) + " ", muted_foreground | TB_DIM},
-            {std::string(1, marker), foreground},
+            {.text = "    ", .foreground = TB_DEFAULT},
+            {.text = paddedLineNumber(number, number_width) + " ", .foreground = muted_foreground | TB_DIM},
+            {.text = std::string(1, marker), .foreground = foreground},
         },
         background, added || removed);
     const StyledLine continuation = lineWithPrefix(
         {
-            {std::string(4 + number_width + 2, ' '), TB_DEFAULT},
+            {.text = std::string(4 + number_width + 2, ' '), .foreground = TB_DEFAULT},
         },
         background, added || removed);
     appendLines(lines, wrapStyledText(text, width, first, continuation, foreground));
@@ -857,7 +866,8 @@ void appendEditLines(std::vector<StyledLine>& lines, const microcodex::EditResul
     appendSpan(header, " ");
     appendSpan(header, "-" + std::to_string(removed), error_foreground);
     appendSpan(header, ")");
-    appendLines(lines, wrapStyledSpans(header.spans, width, StyledLine{}, lineWithPrefix({{"  ", TB_DEFAULT}})));
+    appendLines(lines, wrapStyledSpans(header.spans, width, StyledLine{},
+                                       lineWithPrefix({{.text = "  ", .foreground = TB_DEFAULT}})));
 
     for (std::size_t hunk_index = 0; hunk_index < edit.hunks.size(); ++hunk_index) {
         const microcodex::EditHunk& hunk = edit.hunks[hunk_index];
@@ -894,10 +904,10 @@ void appendToolLines(std::vector<StyledLine>& lines, const UiEntry& entry, const
     const std::optional<std::string> command = bashCommand(entry);
     const std::string_view verb = entry.finished && command ? "Ran " : entry.finished ? "Called " : "Running ";
     const StyledLine header = lineWithPrefix({
-        {"• ", static_cast<uintattr_t>(bullet_color | TB_BOLD)},
-        {std::string(verb), TB_DEFAULT | TB_BOLD},
+        {.text = "• ", .foreground = static_cast<uintattr_t>(bullet_color | TB_BOLD)},
+        {.text = std::string(verb), .foreground = TB_DEFAULT | TB_BOLD},
     });
-    const StyledLine continuation = lineWithPrefix({{"  │ ", faint_foreground}});
+    const StyledLine continuation = lineWithPrefix({{.text = "  │ ", .foreground = faint_foreground}});
     if (command) {
         const std::vector<StyledSpan> highlighted = highlightShell(*command);
         appendLines(lines, wrapStyledSpans(highlighted, width, header, continuation));
@@ -910,8 +920,8 @@ void appendToolLines(std::vector<StyledLine>& lines, const UiEntry& entry, const
     }
     const std::string_view output =
         entry.output.empty() ? std::string_view("(no output)") : std::string_view(entry.output);
-    const StyledLine output_first = lineWithPrefix({{"  └ ", faint_foreground}});
-    const StyledLine output_continuation = lineWithPrefix({{"    ", faint_foreground}});
+    const StyledLine output_first = lineWithPrefix({{.text = "  └ ", .foreground = faint_foreground}});
+    const StyledLine output_continuation = lineWithPrefix({{.text = "    ", .foreground = faint_foreground}});
     std::vector<StyledLine> output_lines =
         wrapStyledText(output, width, output_first, output_continuation, muted_foreground);
     if (!show_full_output) {
@@ -966,9 +976,10 @@ std::vector<StyledLine> transcriptLines(UiState& state, const int width) {
                     .background = surface_background,
                     .fill_background = true,
                 });
-                const StyledLine first =
-                    lineWithPrefix({{"› ", TB_DEFAULT | TB_BOLD | TB_DIM}}, surface_background, true);
-                const StyledLine continuation = lineWithPrefix({{"  ", TB_DEFAULT}}, surface_background, true);
+                const StyledLine first = lineWithPrefix({{.text = "› ", .foreground = TB_DEFAULT | TB_BOLD | TB_DIM}},
+                                                        surface_background, true);
+                const StyledLine continuation =
+                    lineWithPrefix({{.text = "  ", .foreground = TB_DEFAULT}}, surface_background, true);
                 appendLines(lines, wrapStyledText(entry.text, width, first, continuation));
                 lines.push_back({
                     .spans = {},
@@ -987,15 +998,17 @@ std::vector<StyledLine> transcriptLines(UiState& state, const int width) {
                 lines.push_back({});
                 break;
             case EntryKind::Error:
-                appendLines(lines,
-                            wrapStyledText(entry.text, width, lineWithPrefix({{"✗ ", error_foreground | TB_BOLD}}),
-                                           lineWithPrefix({{"  ", TB_DEFAULT}}), error_foreground));
+                appendLines(lines, wrapStyledText(
+                                       entry.text, width,
+                                       lineWithPrefix({{.text = "✗ ", .foreground = error_foreground | TB_BOLD}}),
+                                       lineWithPrefix({{.text = "  ", .foreground = TB_DEFAULT}}), error_foreground));
                 lines.push_back({});
                 break;
             case EntryKind::Notice:
-                appendLines(lines,
-                            wrapStyledText(entry.text, width, lineWithPrefix({{"• ", muted_foreground | TB_DIM}}),
-                                           lineWithPrefix({{"  ", TB_DEFAULT}}), muted_foreground));
+                appendLines(lines, wrapStyledText(
+                                       entry.text, width,
+                                       lineWithPrefix({{.text = "• ", .foreground = muted_foreground | TB_DIM}}),
+                                       lineWithPrefix({{.text = "  ", .foreground = TB_DEFAULT}}), muted_foreground));
                 lines.push_back({});
                 break;
         }
@@ -1017,11 +1030,11 @@ StyledLine workingLine(const UiState& state) {
     constexpr std::string_view label = "Working";
     constexpr int padding = 10;
     constexpr int band_half_width = 5;
-    const int period = static_cast<int>(label.size()) + padding * 2;
+    const int period = static_cast<int>(label.size()) + (padding * 2);
     const int position = static_cast<int>((elapsed_milliseconds % 2000) * period / 2000);
     for (std::size_t index = 0; index < label.size(); ++index) {
         const int distance = std::abs(static_cast<int>(index) + padding - position);
-        const uintattr_t shade = distance > band_half_width ? 242 : static_cast<uintattr_t>(255 - distance * 2);
+        const uintattr_t shade = distance > band_half_width ? 242 : static_cast<uintattr_t>(255 - (distance * 2));
         appendSpan(line, label.substr(index, 1), shade | TB_BOLD);
     }
 
@@ -1142,7 +1155,7 @@ int render(UiState& state, const bool turn_active) {
         drawLine({.spans = {}, .background = surface_background, .fill_background = true}, composer_top + composer_row,
                  width);
     }
-    const int prompt_top = composer_top + composer_padding / 2;
+    const int prompt_top = composer_top + (composer_padding / 2);
     for (int prompt_row = 0; prompt_row < prompt_rows; ++prompt_row) {
         const std::size_t index = prompt_start + static_cast<std::size_t>(prompt_row);
         StyledLine line{
@@ -1461,7 +1474,7 @@ void handleKey(UiState& state, microcodex::CodexApi& api, TurnFuture& turn, cons
         state.dirty = true;
         return;
     }
-    if (event.ch != 0 && tb_iswprint(event.ch)) {
+    if (event.ch != 0 && (tb_iswprint(event.ch) != 0)) {
         insertCodepoint(state, event.ch);
     }
 }
@@ -1494,7 +1507,7 @@ std::expected<void, std::string> runInteractive(CodexApiConfig config) {
     if (initialized != TB_OK) {
         return std::unexpected("Could not initialize terminal UI: " + std::string(tb_strerror(initialized)));
     }
-    TerminalGuard terminal;
+    const TerminalGuard terminal;
     tb_set_input_mode(TB_INPUT_ESC | TB_INPUT_MOUSE);
     const int paste_mode = terminal::enableBracketedPaste();
     if (paste_mode != TB_OK) {
@@ -1545,7 +1558,7 @@ std::expected<void, std::string> runInteractive(CodexApiConfig config) {
                 terminal_error = "Could not render terminal animation: " + std::string(tb_strerror(animated));
                 break;
             }
-        } else if (polled != TB_ERR_NO_EVENT && !(polled == TB_ERR_POLL && tb_last_errno() == EINTR)) {
+        } else if (polled != TB_ERR_NO_EVENT && (polled != TB_ERR_POLL || tb_last_errno() != EINTR)) {
             terminal_error = "Could not read terminal input: " + std::string(tb_strerror(polled));
             break;
         }

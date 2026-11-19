@@ -7,15 +7,14 @@
 #include <expected>
 #include <fstream>
 #include <iostream>
+#include <string>
+#include <string_view>
 
 namespace {
 
 bool doesFileExist(const std::string& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        return false;
-    }
-    return true;
+    const std::ifstream file(path, std::ios::binary);
+    return !!file;
 }
 
 }  // namespace

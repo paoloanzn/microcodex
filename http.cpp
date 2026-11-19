@@ -7,9 +7,12 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <exception>
+#include <expected>
 #include <memory>
 #include <string>
+#include <utility>
 
 namespace microcodex {
 
@@ -29,7 +32,7 @@ public:
         return true;
     }
 
-    curl_slist* get() const { return headers_; }
+    [[nodiscard]] curl_slist* get() const { return headers_; }
 
 private:
     curl_slist* headers_ = nullptr;
@@ -97,7 +100,8 @@ std::size_t receiveHeader(char* data, const std::size_t size, const std::size_t 
     return byte_count;
 }
 
-int transferProgress(void* user_data, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+int transferProgress(void* user_data, curl_off_t /*unused*/, curl_off_t /*unused*/, curl_off_t /*unused*/,
+                     curl_off_t /*unused*/) {
     const auto& state = *static_cast<const RequestState*>(user_data);
     return state.request.stop_token.stop_requested() ? 1 : 0;
 }

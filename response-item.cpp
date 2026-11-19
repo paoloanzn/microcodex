@@ -3,6 +3,10 @@
 
 #include "response-item.h"
 
+#include <expected>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <utility>
 
 #include "json.h"
@@ -45,21 +49,21 @@ std::expected<std::string, std::string> messageText(const std::string_view item)
 }  // namespace
 
 std::string userMessageItem(const std::string_view message) {
-    std::string item = "{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":";
+    std::string item = R"({"type":"message","role":"user","content":[{"type":"input_text","text":)";
     json::appendJsonString(item, message);
     item += "}]}";
     return item;
 }
 
 std::string assistantMessageItem(const std::string_view message) {
-    std::string item = "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":";
+    std::string item = R"({"type":"message","role":"assistant","content":[{"type":"output_text","text":)";
     json::appendJsonString(item, message);
     item += "}]}";
     return item;
 }
 
 std::string toolOutputItem(const CodexToolOutput& output) {
-    std::string item = "{\"type\":\"function_call_output\",\"call_id\":";
+    std::string item = R"({"type":"function_call_output","call_id":)";
     json::appendJsonString(item, output.call_id);
     item += ",\"output\":";
     json::appendJsonString(item, output.output);

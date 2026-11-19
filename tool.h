@@ -30,10 +30,10 @@ class ToolArguments {
 public:
     explicit ToolArguments(std::string_view json) : json_(json) {}
 
-    std::expected<std::string, std::string> string(std::string_view name) const;
-    std::expected<std::size_t, std::string> size(std::string_view name) const;
-    std::expected<bool, std::string> boolean(std::string_view name) const;
-    std::expected<bool, std::string> boolean(std::string_view name, bool default_value) const;
+    [[nodiscard]] std::expected<std::string, std::string> string(std::string_view name) const;
+    [[nodiscard]] std::expected<std::size_t, std::string> size(std::string_view name) const;
+    [[nodiscard]] std::expected<bool, std::string> boolean(std::string_view name) const;
+    [[nodiscard]] std::expected<bool, std::string> boolean(std::string_view name, bool default_value) const;
 
 private:
     std::string_view json_;
@@ -43,10 +43,10 @@ class ToolBase {
 public:
     virtual ~ToolBase() = default;
 
-    virtual std::string_view name() const = 0;
-    virtual std::string toJsonString() const = 0;
-    virtual std::expected<ToolResult, std::string> executeJson(std::string_view arguments,
-                                                               std::stop_token stop_token = {}) const = 0;
+    [[nodiscard]] virtual std::string_view name() const = 0;
+    [[nodiscard]] virtual std::string toJsonString() const = 0;
+    [[nodiscard]] virtual std::expected<ToolResult, std::string> executeJson(std::string_view arguments,
+                                                                             std::stop_token stop_token = {}) const = 0;
 };
 
 namespace detail {
@@ -89,13 +89,15 @@ public:
 
     T operator()(S... arguments) const { return callable_(arguments...); }
 
-    std::string_view name() const override { return name_; }
+    [[nodiscard]] std::string_view name() const override { return name_; }
 
     // Parameters must be a JSON Schema object accepted by the Responses API.
-    std::string toJsonString() const override { return detail::toolJsonString(name_, description_, parameters_); }
+    [[nodiscard]] std::string toJsonString() const override {
+        return detail::toolJsonString(name_, description_, parameters_);
+    }
 
-    std::expected<ToolResult, std::string> executeJson(const std::string_view arguments,
-                                                       const std::stop_token stop_token = {}) const override {
+    [[nodiscard]] std::expected<ToolResult, std::string> executeJson(
+        const std::string_view arguments, const std::stop_token stop_token = {}) const override {
         if (!adapter_) {
             return std::unexpected("Tool '" + name_ + "' has no JSON execution adapter");
         }

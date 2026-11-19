@@ -4,19 +4,27 @@
 #include "conversation.h"
 
 #include <fcntl.h>
-#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <cerrno>
 #include <charconv>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <expected>
+#include <filesystem>
 #include <fstream>
+#include <ios>
 #include <limits>
 #include <optional>
+#include <span>
+#include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 #include "json.h"
 #include "response-item.h"
@@ -135,7 +143,7 @@ std::expected<CompactionCheckpoint, std::string> parseCheckpoint(const std::stri
 }
 
 std::string metadataRecord(const ConversationMetadata& metadata) {
-    std::string record = "{\"type\":\"conversation\",\"version\":" + std::to_string(metadata.version) + ",\"id\":";
+    std::string record = R"({"type":"conversation","version":)" + std::to_string(metadata.version) + ",\"id\":";
     json::appendJsonString(record, metadata.id);
     record += ",\"created_at\":";
     json::appendJsonString(record, metadata.created_at);
@@ -149,7 +157,7 @@ std::string metadataRecord(const ConversationMetadata& metadata) {
 
 std::string turnRecord(const std::uint64_t number, const std::string_view id,
                        const std::span<const std::string> items) {
-    std::string record = "{\"type\":\"turn\",\"number\":" + std::to_string(number) + ",\"id\":";
+    std::string record = R"({"type":"turn","number":)" + std::to_string(number) + ",\"id\":";
     json::appendJsonString(record, id);
     record += ",\"items\":[";
     for (std::size_t index = 0; index < items.size(); ++index) {
@@ -161,7 +169,7 @@ std::string turnRecord(const std::uint64_t number, const std::string_view id,
 }
 
 std::string checkpointRecord(const CompactionCheckpoint& checkpoint) {
-    std::string record = "{\"type\":\"checkpoint\",\"generation\":" + std::to_string(checkpoint.generation) +
+    std::string record = R"({"type":"checkpoint","generation":)" + std::to_string(checkpoint.generation) +
                          ",\"through_turn\":" + std::to_string(checkpoint.through_turn) +
                          ",\"keep_from_turn\":" + std::to_string(checkpoint.keep_from_turn) + ",\"summary\":";
     json::appendJsonString(record, checkpoint.summary);
@@ -311,13 +319,13 @@ std::expected<void, std::string> ConversationFile::appendRecord(const std::strin
     if (!written) {
         // A failed record is never allowed to become part of a later resume.
         // Best-effort truncation restores the last known durable boundary.
-        ::ftruncate(descriptor_, static_cast<off_t>(file_size_));
+        [[maybe_unused]] const int truncated = ::ftruncate(descriptor_, static_cast<off_t>(file_size_));
         ::close(std::exchange(descriptor_, -1));
         return written;
     }
     if (::fsync(descriptor_) != 0) {
         const std::string error = systemError("Could not sync conversation");
-        ::ftruncate(descriptor_, static_cast<off_t>(file_size_));
+        [[maybe_unused]] const int truncated = ::ftruncate(descriptor_, static_cast<off_t>(file_size_));
         ::close(std::exchange(descriptor_, -1));
         return std::unexpected(error);
     }
@@ -341,7 +349,7 @@ std::expected<void, std::string> ConversationFile::appendTurn(const std::uint64_
     turn_locations_.push_back({
         .number = number,
         .offset = offset,
-        .length = static_cast<std::uint64_t>(record.size() + 1),
+        .length = record.size() + 1,
     });
     return {};
 }
@@ -384,7 +392,7 @@ std::expected<ResumedConversation, std::string> ConversationFile::resume() {
             }
             break;
         }
-        const std::uint64_t record_length = static_cast<std::uint64_t>(line.size() + 1);
+        const std::uint64_t record_length = line.size() + 1;
         offset += record_length;
 
         if (line.size() > maximum_record_bytes) {
@@ -525,10 +533,9 @@ std::expected<std::vector<ConversationSummary>, std::string> listConversations(c
     if (error) {
         return std::unexpected("Could not list conversations: " + error.message());
     }
-    std::sort(conversations.begin(), conversations.end(),
-              [](const ConversationSummary& left, const ConversationSummary& right) {
-                  return left.metadata.created_at > right.metadata.created_at;
-              });
+    std::ranges::sort(conversations, [](const ConversationSummary& left, const ConversationSummary& right) {
+        return left.metadata.created_at > right.metadata.created_at;
+    });
     return conversations;
 }
 

@@ -3,8 +3,10 @@
 
 #include "glob.h"
 
-#include <glob.h>
+// The POSIX header, not this project's "glob.h".
+#include <glob.h>  // NOLINT(readability-duplicate-include) IWYU pragma: keep
 
+#include <cstddef>
 #include <expected>
 #include <string>
 
@@ -20,7 +22,7 @@ public:
 
     glob_t* get() { return &value_; }
 
-    const glob_t& value() const { return value_; }
+    [[nodiscard]] const glob_t& value() const { return value_; }
 
 private:
     glob_t value_{};

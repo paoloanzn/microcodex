@@ -4,6 +4,11 @@
 #include "tool.h"
 
 #include <charconv>
+#include <cstddef>
+#include <expected>
+#include <string>
+#include <string_view>
+#include <system_error>
 
 #include "json.h"
 
