@@ -2,8 +2,8 @@
 
 set -u
 
-script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd) || exit 1
-ROOT_DIR=$(CDPATH= cd "$script_dir/.." && pwd) || exit 1
+script_dir=$(CDPATH='' cd "$(dirname "$0")" && pwd) || exit 1
+ROOT_DIR=$(CDPATH='' cd "$script_dir/.." && pwd) || exit 1
 TEST_DIR=$script_dir
 APP=$ROOT_DIR/build/microcodex
 MOCK_SERVER=$ROOT_DIR/tests/mock-server.rb
@@ -193,6 +193,7 @@ for test_file in "$@"; do
         printf 'missing test file: %s\n' "$test_file" >&2
         exit 1
     fi
+    # shellcheck source=/dev/null # Each test file is checked on its own.
     . "$test_file"
 done
 

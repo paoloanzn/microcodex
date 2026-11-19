@@ -8,7 +8,7 @@ case "$0" in
   */*) launcher_path="$0" ;;
   *) launcher_path="$(command -v "$0")" || exit 1 ;;
 esac
-script_dir="$(CDPATH= cd "$(dirname "$launcher_path")" && pwd)" || exit 1
+script_dir="$(CDPATH='' cd "$(dirname "$launcher_path")" && pwd)" || exit 1
 REAL_BINARY="$script_dir/microcodex-bin"
 tmp_dir=""
 
