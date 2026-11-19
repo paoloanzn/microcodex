@@ -62,7 +62,7 @@ The body is built by `CodexApi::buildRequestBody()`:
 
 | Field | Value |
 |---|---|
-| `model` | `CodexApiConfig::model`, for example `gpt-6-sol`. |
+| `model` | `CodexApiConfig::model`, for example `gpt-6.2-sol`. |
 | `instructions` | The system prompt plus the skills catalog. |
 | `input` | The [global AGENTS.md](#the-global-agentsmd) message when there is one, then every item in `input_items_`, in order. |
 | `tools`, `tool_choice`, `parallel_tool_calls` | The tool definitions, `"auto"` and `true`. |

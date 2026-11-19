@@ -45,7 +45,7 @@ The options must come before the prompt:
 
 | Option | Default | Notes |
 |---|---|---|
-| `--model MODEL` | `gpt-6-sol` | Any model the account can use. A value that starts with `--` is rejected. |
+| `--model MODEL` | `gpt-6.2-sol` | Any model the account can use. A value that starts with `--` is rejected. |
 | `--effort EFFORT` | `medium` | One of the values below. Overrides `MICROCODEX_EFFORT`. |
 
 The effort is sent as the request's `reasoning.effort`. In an interactive
@@ -57,6 +57,9 @@ on the way:
 | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | unchanged |
 | `ultra` | `max` |
 | `persistent` | `disabled` |
+
+In Codex, `ultra` also runs sub-agents. MicroCodex has no sub-agents, so
+`ultra` is the same as `max`, the highest effort every GPT-6 model accepts.
 
 An empty or unknown value is an error, reported before any network request:
 
@@ -148,7 +151,7 @@ there was no file.
 | `MICROCODEX_TOOL_EXECUTION_TIMEOUT_SECONDS` | `120` | Time limit for each tool call. `0` disables it. The maximum is 31536000 (one year). |
 | `MICROCODEX_COMPACT_AT_TOKENS` | from the model catalog | Context size that triggers compaction. `0` disables automatic compaction. |
 | `MICROCODEX_RETAINED_CONTEXT_TOKENS` | `20480` | Token budget for the recent turns kept word for word by compaction. |
-| `MICROCODEX_API_ENDPOINT` | `https://chatgpt.com/backend-api/codex/responses` | Responses endpoint. The model catalog is read from the same base URL, with `/responses` replaced by `/models`. |
+| `MICROCODEX_API_ENDPOINT` | `https://chatgpt.com/backend-api/codex/responses` | Responses endpoint. The model catalog is read from the same base URL, with `/responses` replaced by `/models?client_version=0.166.0`. The backend lists only the models that version supports, which includes the GPT-6.2 models; any other model prints `Warning: Models API did not return metadata for 'MODEL'. Using built-in context limits.` |
 | `SHELL` | `/bin/sh` | Shell used by the `bash` tool. See [built-in tools](built-in-tools.md#bash). |
 
 The numeric variables must be unsigned integers; an empty value counts as
@@ -237,8 +240,8 @@ or given unexpected arguments shows an error:
 `/status` prints, for example:
 
 ```text
-• Model: gpt-6-sol
+• Model: gpt-6.2-sol
   Reasoning effort: medium
   Saved turns: 0
-  Context: 0 of 258,400 tokens, compacts at 244,800
+  Context: 0 of 475,000 tokens, compacts at 450,000
 ```

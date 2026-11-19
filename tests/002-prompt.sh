@@ -26,7 +26,7 @@ STDOUT
 Agent failed: Codex API returned HTTP 429: rate limited
 STDERR
 
-expect_process "T2.3: no --model sends the GPT-6 default" 0 \
+expect_process "T2.3: no --model sends the GPT-6.2 default" 0 \
     run_with_mock default-model env CODEX_HOME="$prompt_home" PATH="$TEST_BIN_DIR:$PATH" \
         microcodex Say hello with the default model <<'STDOUT' 3<<'STDERR'
 Hello from the default model!
