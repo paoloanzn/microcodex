@@ -229,7 +229,8 @@ std::string percentEncode(const std::string_view value) {
     constexpr std::string_view hex = "0123456789ABCDEF";
     std::string encoded;
     encoded.reserve(value.size());
-    for (const unsigned char character : value) {
+    for (const char byte : value) {
+        const auto character = static_cast<unsigned char>(byte);
         if ((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
             (character >= '0' && character <= '9') || character == '-' || character == '.' || character == '_' ||
             character == '~') {

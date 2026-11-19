@@ -197,7 +197,8 @@ void readStream(pollfd& descriptor, std::string& destination, const std::span<ch
     }
 }
 
-int exitCode(const int status) {
+// status stays non-const: macOS's W* macros cast its address to int*.
+int exitCode(int status) {
     if (WIFEXITED(status)) {
         return WEXITSTATUS(status);
     }

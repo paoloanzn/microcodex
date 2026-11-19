@@ -476,7 +476,8 @@ std::expected<std::vector<std::string_view>, std::string> jsonArrayElements(cons
 void appendJsonString(std::string& json, const std::string_view value) {
     constexpr std::string_view hex = "0123456789abcdef";
     json += '"';
-    for (const unsigned char character : value) {
+    for (const char byte : value) {
+        const auto character = static_cast<unsigned char>(byte);
         switch (character) {
             case '"': json += "\\\""; break;
             case '\\': json += "\\\\"; break;
