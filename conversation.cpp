@@ -17,7 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <ios>
-#include <limits>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -36,7 +36,14 @@ namespace {
 constexpr std::size_t maximum_record_bytes = std::size_t{16} * 1024 * 1024;
 
 std::string systemError(const std::string_view operation) {
-    return std::string(operation) + ": " + std::strerror(errno);
+    const int error_number = errno;
+    return std::string(operation) + ": " + std::generic_category().message(error_number);
+}
+
+// Returns the variable's value, or an empty view when it is unset.
+std::string_view environmentValue(const char* name) {
+    const char* value = std::getenv(name);
+    return value != nullptr ? std::string_view(value) : std::string_view{};
 }
 
 std::expected<std::uint64_t, std::string> unsignedMember(const std::string_view object, const std::string_view name) {
@@ -45,8 +52,8 @@ std::expected<std::uint64_t, std::string> unsignedMember(const std::string_view 
         return std::unexpected(member.error());
     }
     std::uint64_t value = 0;
-    const char* begin = member->data();
-    const char* end = begin + member->size();
+    const char* begin = std::to_address(member->begin());
+    const char* end = std::to_address(member->end());
     const auto [parsed_end, error] = std::from_chars(begin, end, value);
     if (error != std::errc{} || parsed_end != end) {
         return std::unexpected("JSON member '" + std::string(name) + "' is not an unsigned integer");
@@ -89,7 +96,7 @@ std::expected<ConversationMetadata, std::string> parseMetadata(const std::string
     if (*type != "conversation") {
         return std::unexpected("Conversation file does not begin with metadata");
     }
-    if (*version != 1 || *version > std::numeric_limits<std::uint32_t>::max()) {
+    if (*version != 1) {
         return std::unexpected("Unsupported conversation file version " + std::to_string(*version));
     }
     return ConversationMetadata{
@@ -190,8 +197,15 @@ std::expected<void, std::string> writeAll(const int descriptor, const std::strin
     return {};
 }
 
-std::expected<std::string, std::string> readRecord(const std::filesystem::path& path, const std::uint64_t offset,
-                                                   const std::uint64_t length) {
+// Where one record sits in the conversation file, including its newline.
+struct RecordSpan {
+    std::uint64_t offset;
+    std::uint64_t length;
+};
+
+std::expected<std::string, std::string> readRecord(const std::filesystem::path& path, const RecordSpan span) {
+    const std::uint64_t offset = span.offset;
+    const std::uint64_t length = span.length;
     std::ifstream file(path, std::ios::binary);
     if (!file) {
         return std::unexpected("Could not open conversation '" + path.string() + "'");
@@ -209,13 +223,76 @@ std::expected<std::string, std::string> readRecord(const std::filesystem::path& 
     return line;
 }
 
+// What resume() has learned from the records read so far.
+struct ResumeScan {
+    std::optional<ConversationMetadata> metadata;
+    std::optional<CompactionCheckpoint> checkpoint;
+    std::uint64_t last_turn_number = 0;
+};
+
+std::expected<std::uint64_t, std::string> scanTurn(ResumeScan& scan, const std::string_view line) {
+    auto turn = parseTurn(line);
+    if (!turn) return std::unexpected(turn.error());
+    if (turn->number != scan.last_turn_number + 1) {
+        return std::unexpected("Conversation turn numbers are not consecutive");
+    }
+    scan.last_turn_number = turn->number;
+    return turn->number;
+}
+
+std::expected<void, std::string> scanCheckpoint(ResumeScan& scan, const std::string_view line) {
+    auto parsed = parseCheckpoint(line);
+    if (!parsed) return std::unexpected(parsed.error());
+    const std::uint64_t expected_generation = scan.checkpoint ? scan.checkpoint->generation + 1 : 1;
+    if (parsed->through_turn != scan.last_turn_number || parsed->generation != expected_generation) {
+        return std::unexpected("Compaction checkpoints are inconsistent");
+    }
+    scan.checkpoint = std::move(*parsed);
+    return {};
+}
+
+// Validates one complete record and folds it into the scan. Returns the turn
+// number when the record is a turn, so the caller can index it.
+std::expected<std::optional<std::uint64_t>, std::string> scanRecord(ResumeScan& scan, const std::string_view line,
+                                                                    const std::uint64_t record_offset) {
+    if (line.size() > maximum_record_bytes) {
+        return std::unexpected("Conversation record exceeds the size limit");
+    }
+    auto type = json::requiredJsonString(line, "type");
+    if (!type) {
+        return std::unexpected("Invalid conversation record at byte " + std::to_string(record_offset) + ": " +
+                               type.error());
+    }
+
+    if (!scan.metadata) {
+        auto parsed = parseMetadata(line);
+        if (!parsed) return std::unexpected(parsed.error());
+        scan.metadata = std::move(*parsed);
+        return std::optional<std::uint64_t>{};
+    }
+    if (*type == "conversation") {
+        return std::unexpected("Conversation contains more than one metadata record");
+    }
+    if (*type == "turn") {
+        auto number = scanTurn(scan, line);
+        if (!number) return std::unexpected(number.error());
+        return std::optional<std::uint64_t>{*number};
+    }
+    if (*type == "checkpoint") {
+        auto scanned = scanCheckpoint(scan, line);
+        if (!scanned) return std::unexpected(scanned.error());
+        return std::optional<std::uint64_t>{};
+    }
+    return std::unexpected("Unknown conversation record type '" + *type + "'");
+}
+
 }  // namespace
 
 std::expected<std::filesystem::path, std::string> conversationDirectory() {
-    if (const char* codex_home = std::getenv("CODEX_HOME"); codex_home != nullptr && codex_home[0] != '\0') {
+    if (const std::string_view codex_home = environmentValue("CODEX_HOME"); !codex_home.empty()) {
         return std::filesystem::path(codex_home) / "conversations";
     }
-    if (const char* user_home = std::getenv("HOME"); user_home != nullptr && user_home[0] != '\0') {
+    if (const std::string_view user_home = environmentValue("HOME"); !user_home.empty()) {
         return std::filesystem::path(user_home) / ".codex" / "conversations";
     }
     return std::unexpected("Neither CODEX_HOME nor HOME is set");
@@ -230,6 +307,7 @@ std::expected<ConversationMetadata, std::string> readConversationMetadata(const 
     return parseMetadata(first_line);
 }
 
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters): private constructor; every call site is in this file.
 ConversationFile::ConversationFile(std::filesystem::path path, const int descriptor, const std::uint64_t file_size)
     : path_(std::move(path)), descriptor_(descriptor), file_size_(file_size) {}
 
@@ -273,6 +351,7 @@ std::expected<ConversationFile, std::string> ConversationFile::create(const std:
     }
 
     const std::filesystem::path path = directory / (metadata.id + ".jsonl");
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): open(2) is variadic for its mode argument.
     const int descriptor = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_APPEND, 0600);
     if (descriptor < 0) {
         return std::unexpected(systemError("Could not create conversation"));
@@ -291,6 +370,7 @@ std::expected<ConversationFile, std::string> ConversationFile::open(const std::f
     if (error) {
         return std::unexpected("Could not inspect conversation '" + path.string() + "': " + error.message());
     }
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): open(2) is variadic for its mode argument.
     const int descriptor = ::open(path.c_str(), O_WRONLY | O_APPEND);
     if (descriptor < 0) {
         return std::unexpected(systemError("Could not open conversation for append"));
@@ -362,6 +442,22 @@ std::expected<void, std::string> ConversationFile::appendCheckpoint(const Compac
     return appendRecord(checkpointRecord(checkpoint));
 }
 
+// An unterminated final line is a write interrupted by a crash. A writable
+// resume removes it; read-only history simply ignores it.
+std::expected<void, std::string> ConversationFile::removeUnterminatedTail(const std::uint64_t record_offset) {
+    if (descriptor_ < 0) {
+        return {};
+    }
+    if (::ftruncate(descriptor_, static_cast<off_t>(record_offset)) != 0) {
+        return std::unexpected(systemError("Could not repair conversation tail"));
+    }
+    if (::fsync(descriptor_) != 0) {
+        return std::unexpected(systemError("Could not sync repaired conversation"));
+    }
+    file_size_ = record_offset;
+    return {};
+}
+
 std::expected<ResumedConversation, std::string> ConversationFile::resume() {
     std::ifstream input(path_, std::ios::binary);
     if (!input) {
@@ -369,77 +465,35 @@ std::expected<ResumedConversation, std::string> ConversationFile::resume() {
     }
 
     turn_locations_.clear();
-    std::optional<ConversationMetadata> metadata;
-    std::optional<CompactionCheckpoint> checkpoint;
+    ResumeScan scan;
     std::uint64_t offset = 0;
-    std::uint64_t last_turn_number = 0;
     std::string line;
 
     while (std::getline(input, line)) {
         const std::uint64_t record_offset = offset;
         const bool terminated = record_offset + line.size() < file_size_;
         if (!terminated) {
-            // An unterminated final line is a write interrupted by a crash.
-            // A writable resume removes it; read-only history simply ignores it.
-            if (descriptor_ >= 0) {
-                if (::ftruncate(descriptor_, static_cast<off_t>(record_offset)) != 0) {
-                    return std::unexpected(systemError("Could not repair conversation tail"));
-                }
-                if (::fsync(descriptor_) != 0) {
-                    return std::unexpected(systemError("Could not sync repaired conversation"));
-                }
-                file_size_ = record_offset;
-            }
+            auto repaired = removeUnterminatedTail(record_offset);
+            if (!repaired) return std::unexpected(repaired.error());
             break;
         }
         const std::uint64_t record_length = line.size() + 1;
         offset += record_length;
 
-        if (line.size() > maximum_record_bytes) {
-            return std::unexpected("Conversation record exceeds the size limit");
-        }
-        auto type = json::requiredJsonString(line, "type");
-        if (!type) {
-            return std::unexpected("Invalid conversation record at byte " + std::to_string(record_offset) + ": " +
-                                   type.error());
-        }
-
-        if (!metadata) {
-            auto parsed = parseMetadata(line);
-            if (!parsed) return std::unexpected(parsed.error());
-            metadata = std::move(*parsed);
-            continue;
-        }
-        if (*type == "conversation") {
-            return std::unexpected("Conversation contains more than one metadata record");
-        }
-        if (*type == "turn") {
-            auto turn = parseTurn(line);
-            if (!turn) return std::unexpected(turn.error());
-            if (turn->number != last_turn_number + 1) {
-                return std::unexpected("Conversation turn numbers are not consecutive");
-            }
-            last_turn_number = turn->number;
+        auto turn_number = scanRecord(scan, line, record_offset);
+        if (!turn_number) return std::unexpected(turn_number.error());
+        if (const std::optional<std::uint64_t>& number = *turn_number; number) {
             turn_locations_.push_back({
-                .number = turn->number,
+                .number = *number,
                 .offset = record_offset,
                 .length = record_length,
             });
-            continue;
         }
-        if (*type == "checkpoint") {
-            auto parsed = parseCheckpoint(line);
-            if (!parsed) return std::unexpected(parsed.error());
-            const std::uint64_t expected_generation = checkpoint ? checkpoint->generation + 1 : 1;
-            if (parsed->through_turn != last_turn_number || parsed->generation != expected_generation) {
-                return std::unexpected("Compaction checkpoints are inconsistent");
-            }
-            checkpoint = std::move(*parsed);
-            continue;
-        }
-        return std::unexpected("Unknown conversation record type '" + *type + "'");
     }
 
+    std::optional<ConversationMetadata>& metadata = scan.metadata;
+    const std::optional<CompactionCheckpoint>& checkpoint = scan.checkpoint;
+    const std::uint64_t last_turn_number = scan.last_turn_number;
     if (!metadata) {
         return std::unexpected("Conversation file is empty");
     }
@@ -472,7 +526,7 @@ std::expected<ResumedConversation, std::string> ConversationFile::resume() {
 }
 
 std::expected<SavedTurn, std::string> ConversationFile::readTurn(const TurnLocation& location) const {
-    auto record = readRecord(path_, location.offset, location.length);
+    auto record = readRecord(path_, {.offset = location.offset, .length = location.length});
     if (!record) return std::unexpected(record.error());
     auto type = json::requiredJsonString(*record, "type");
     if (!type || *type != "turn") {
@@ -482,6 +536,7 @@ std::expected<SavedTurn, std::string> ConversationFile::readTurn(const TurnLocat
 }
 
 std::expected<std::vector<SavedTurn>, std::string> ConversationFile::readTurnsBefore(
+    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters): a turn index and a byte budget; callers name both.
     const std::size_t cursor, const std::size_t maximum_bytes) const {
     if (maximum_bytes == 0 || turn_locations_.empty()) {
         return std::vector<SavedTurn>{};

@@ -29,6 +29,6 @@ struct EditResult {
 };
 
 std::expected<EditResult, std::string> edit(const std::string& path, std::string_view old_content,
-                                            std::string_view new_content, bool replaceAll);
+                                            std::string_view new_content, bool replace_all);
 
 }  // namespace microcodex

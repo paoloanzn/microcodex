@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -12,7 +13,7 @@
 
 namespace microcodex {
 
-enum class CodexEventType {
+enum class CodexEventType : std::uint8_t {
     TurnStarted,
     TextDelta,
     ToolStarted,
@@ -49,8 +50,11 @@ public:
     CodexEventEmitter() = default;
     explicit CodexEventEmitter(CodexEventHandler handler);
 
+    ~CodexEventEmitter() = default;
     CodexEventEmitter(const CodexEventEmitter&) = delete;
     CodexEventEmitter& operator=(const CodexEventEmitter&) = delete;
+    CodexEventEmitter(CodexEventEmitter&&) = delete;
+    CodexEventEmitter& operator=(CodexEventEmitter&&) = delete;
 
     void setHandler(CodexEventHandler handler);
     void clearHandler();

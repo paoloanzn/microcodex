@@ -46,12 +46,26 @@ public:
     [[nodiscard]] virtual std::string_view name() const = 0;
     [[nodiscard]] virtual std::string toJsonString() const = 0;
     [[nodiscard]] virtual std::expected<ToolResult, std::string> executeJson(std::string_view arguments,
-                                                                             std::stop_token stop_token = {}) const = 0;
+                                                                             std::stop_token stop_token) const = 0;
+
+protected:
+    // Copies and moves stay with concrete tools, so a ToolBase is never sliced.
+    ToolBase() = default;
+    ToolBase(const ToolBase&) = default;
+    ToolBase(ToolBase&&) = default;
+    ToolBase& operator=(const ToolBase&) = default;
+    ToolBase& operator=(ToolBase&&) = default;
 };
 
 namespace detail {
-std::string toolJsonString(std::string_view name, std::string_view description, std::string_view parameters);
-}
+struct ToolJsonFields {
+    std::string_view name;
+    std::string_view description;
+    std::string_view parameters;
+};
+
+std::string toolJsonString(const ToolJsonFields& fields);
+}  // namespace detail
 
 // Example for `std::expected<int, std::string> write(const std::string &, std::string_view)`.
 // ToolArguments provides the shared JSON decoding; the adapter only calls the tool.
@@ -93,11 +107,11 @@ public:
 
     // Parameters must be a JSON Schema object accepted by the Responses API.
     [[nodiscard]] std::string toJsonString() const override {
-        return detail::toolJsonString(name_, description_, parameters_);
+        return detail::toolJsonString({.name = name_, .description = description_, .parameters = parameters_});
     }
 
-    [[nodiscard]] std::expected<ToolResult, std::string> executeJson(
-        const std::string_view arguments, const std::stop_token stop_token = {}) const override {
+    [[nodiscard]] std::expected<ToolResult, std::string> executeJson(const std::string_view arguments,
+                                                                     const std::stop_token stop_token) const override {
         if (!adapter_) {
             return std::unexpected("Tool '" + name_ + "' has no JSON execution adapter");
         }

@@ -4,6 +4,7 @@
 #include "styled-text.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
@@ -24,10 +25,10 @@ std::pair<std::uint32_t, std::size_t> decodeCodepoint(const std::string_view tex
         return {0xfffd, 1};
     }
 
-    char utf8[7]{};
-    std::copy_n(text.data() + offset, requested, utf8);
+    std::array<char, 7> utf8{};
+    text.copy(utf8.data(), static_cast<std::size_t>(requested), offset);
     std::uint32_t codepoint = 0xfffd;
-    const int decoded = tb_utf8_char_to_unicode(&codepoint, utf8);
+    const int decoded = tb_utf8_char_to_unicode(&codepoint, utf8.data());
     if (decoded <= 0) {
         return {0xfffd, 1};
     }
@@ -71,74 +72,110 @@ StyledLine lineWithPrefix(const std::initializer_list<StyledSpan> prefix, const 
     return line;
 }
 
-std::vector<StyledLine> wrapStyledSpans(const std::span<const StyledSpan> spans, const int requested_width,
-                                        const StyledLine& first_template, const StyledLine& continuation_template) {
-    const int width = std::max(1, requested_width);
-    std::vector<StyledLine> result;
-    StyledLine line = first_template;
-    int column = 0;
-    for (const StyledSpan& span : line.spans) {
-        column += textWidth(span.text);
+namespace {
+
+// Tab stops are every four columns.
+constexpr int tab_width = 4;
+
+// Builds wrapped lines one codepoint at a time. Each new line starts from a
+// prefix template, and wrapping happens only once the line holds content
+// beyond that prefix.
+class SpanWrapper {
+public:
+    SpanWrapper(StyledLine first_line, const int width, const StyledLine& continuation_template)
+        : width_(width), continuation_template_(continuation_template), line_(std::move(first_line)) {
+        startLine();
     }
-    int content_start = column;
 
-    const auto startContinuation = [&] {
-        result.push_back(std::move(line));
-        line = continuation_template;
-        column = 0;
-        for (const StyledSpan& span : line.spans) {
-            column += textWidth(span.text);
-        }
-        content_start = column;
-    };
-
-    for (const StyledSpan& span : spans) {
+    void appendSpan(const StyledSpan& span) {
         for (std::size_t offset = 0; offset < span.text.size();) {
             auto [codepoint, length] = decodeCodepoint(span.text, offset);
             if (length == 0) {
                 break;
             }
             offset += length;
-
-            if (codepoint == '\r') {
-                continue;
-            }
-            if (codepoint == '\n') {
-                startContinuation();
-                continue;
-            }
-            if (codepoint == '\t') {
-                const int spaces = 4 - (column % 4);
-                for (int index = 0; index < spaces; ++index) {
-                    if (column >= width && column > content_start) {
-                        startContinuation();
-                    }
-                    appendSpan(line, " ", span.foreground);
-                    ++column;
-                }
-                continue;
-            }
-
-            int codepoint_width = tb_wcwidth(codepoint);
-            if (codepoint_width < 0) {
-                codepoint = 0xfffd;
-                codepoint_width = 1;
-            }
-            if (codepoint_width > 0 && column + codepoint_width > width && column > content_start) {
-                startContinuation();
-            }
-
-            char utf8[7]{};
-            const int encoded = tb_utf8_unicode_to_char(utf8, codepoint);
-            if (encoded > 0) {
-                appendSpan(line, std::string_view(utf8, static_cast<std::size_t>(encoded)), span.foreground);
-            }
-            column += std::max(0, codepoint_width);
+            appendCodepoint(codepoint, span.foreground);
         }
     }
 
-    result.push_back(std::move(line));
-    return result;
+    std::vector<StyledLine> finish() && {
+        result_.push_back(std::move(line_));
+        return std::move(result_);
+    }
+
+private:
+    void startLine() {
+        column_ = 0;
+        for (const StyledSpan& span : line_.spans) {
+            column_ += textWidth(span.text);
+        }
+        content_start_ = column_;
+    }
+
+    void startContinuation() {
+        result_.push_back(std::move(line_));
+        line_ = continuation_template_;
+        startLine();
+    }
+
+    void appendTab(const uintattr_t foreground) {
+        const int spaces = tab_width - (column_ % tab_width);
+        for (int index = 0; index < spaces; ++index) {
+            if (column_ >= width_ && column_ > content_start_) {
+                startContinuation();
+            }
+            ui::appendSpan(line_, " ", foreground);
+            ++column_;
+        }
+    }
+
+    void appendCodepoint(std::uint32_t codepoint, const uintattr_t foreground) {
+        if (codepoint == '\r') {
+            return;
+        }
+        if (codepoint == '\n') {
+            startContinuation();
+            return;
+        }
+        if (codepoint == '\t') {
+            appendTab(foreground);
+            return;
+        }
+
+        int codepoint_width = tb_wcwidth(codepoint);
+        if (codepoint_width < 0) {
+            codepoint = 0xfffd;
+            codepoint_width = 1;
+        }
+        if (codepoint_width > 0 && column_ + codepoint_width > width_ && column_ > content_start_) {
+            startContinuation();
+        }
+
+        std::array<char, 7> utf8{};
+        const int encoded = tb_utf8_unicode_to_char(utf8.data(), codepoint);
+        if (encoded > 0) {
+            ui::appendSpan(line_, std::string_view(utf8.data(), static_cast<std::size_t>(encoded)), foreground);
+        }
+        column_ += std::max(0, codepoint_width);
+    }
+
+    int width_;
+    const StyledLine& continuation_template_;
+    std::vector<StyledLine> result_;
+    StyledLine line_;
+    int column_ = 0;
+    int content_start_ = 0;
+};
+
+}  // namespace
+
+std::vector<StyledLine> wrapStyledSpans(const std::span<const StyledSpan> spans, const int requested_width,
+                                        const StyledLine& first_template, const StyledLine& continuation_template) {
+    SpanWrapper wrapper(first_template, std::max(1, requested_width), continuation_template);
+    for (const StyledSpan& span : spans) {
+        wrapper.appendSpan(span);
+    }
+    return std::move(wrapper).finish();
 }
 
 std::vector<StyledLine> wrapStyledText(const std::string_view text, const int width, const StyledLine& first_template,

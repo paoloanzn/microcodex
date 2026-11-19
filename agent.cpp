@@ -32,9 +32,9 @@ std::expected<microcodex::ToolResult, std::string> executeRead(
     auto path = arguments.string("path");
     auto offset = arguments.size("offset");
     auto limit = arguments.size("limit");
-    if (!path || !offset || !limit) {
-        return std::unexpected(!path ? path.error() : !offset ? offset.error() : limit.error());
-    }
+    if (!path) return std::unexpected(path.error());
+    if (!offset) return std::unexpected(offset.error());
+    if (!limit) return std::unexpected(limit.error());
     if (stop_token.stop_requested()) {
         return std::unexpected("Tool execution interrupted");
     }

@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <ios>
+#include <istream>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -20,7 +21,7 @@ namespace microcodex {
 
 namespace {
 
-constexpr std::size_t maximum_skill_file_bytes = 1024 * 1024;
+constexpr std::size_t maximum_skill_file_bytes = std::size_t{1024} * 1024;
 constexpr std::size_t maximum_skill_entries = 20'000;
 constexpr int maximum_scan_depth = 6;
 
@@ -64,24 +65,29 @@ std::string yamlScalar(std::string_view value) {
     return std::string(value);
 }
 
-std::optional<SkillMetadata> readSkillMetadata(const std::filesystem::path& path) {
-    std::error_code error;
-    const auto size = std::filesystem::file_size(path, error);
-    if (error || size > maximum_skill_file_bytes) return std::nullopt;
-
-    std::ifstream input(path, std::ios::binary);
-    if (!input) return std::nullopt;
-
-    std::string line;
-    if (!std::getline(input, line) || trim(line) != "---") return std::nullopt;
-
+struct FrontMatter {
     std::string name;
     std::string description;
-    std::string* folded = nullptr;
     bool closed = false;
+};
+
+// The front matter field a key sets, or null for keys skills do not use.
+std::string* frontMatterField(FrontMatter& front_matter, const std::string_view key) {
+    if (key == "name") return &front_matter.name;
+    if (key == "description") return &front_matter.description;
+    return nullptr;
+}
+
+// Read the name and description from the YAML front matter that follows the
+// opening "---" line, up to the closing "---". Folded and literal block
+// scalars (">", ">-", "|", "|-") join their indented lines with spaces.
+FrontMatter readFrontMatter(std::istream& input) {
+    FrontMatter front_matter;
+    std::string line;
+    std::string* folded = nullptr;
     while (std::getline(input, line)) {
         if (trim(line) == "---") {
-            closed = true;
+            front_matter.closed = true;
             break;
         }
 
@@ -100,11 +106,7 @@ std::optional<SkillMetadata> readSkillMetadata(const std::filesystem::path& path
         if (colon == std::string::npos) continue;
         const std::string_view key = trim(std::string_view(line).substr(0, colon));
         const std::string_view value = trim(std::string_view(line).substr(colon + 1));
-        std::string* target = nullptr;
-        if (key == "name")
-            target = &name;
-        else if (key == "description")
-            target = &description;
+        std::string* target = frontMatterField(front_matter, key);
         if (target == nullptr) continue;
 
         if (value == ">" || value == ">-" || value == "|" || value == "|-") {
@@ -114,25 +116,47 @@ std::optional<SkillMetadata> readSkillMetadata(const std::filesystem::path& path
             *target = yamlScalar(value);
         }
     }
+    return front_matter;
+}
 
-    if (!closed || name.empty() || description.empty() || name.size() > 128 || description.size() > 1024 ||
-        name.find_first_of("\r\n") != std::string::npos || description.find_first_of("\r\n") != std::string::npos) {
+bool isValidFrontMatter(const FrontMatter& front_matter) {
+    const std::string& name = front_matter.name;
+    const std::string& description = front_matter.description;
+    return front_matter.closed && !name.empty() && !description.empty() && name.size() <= 128 &&
+           description.size() <= 1024 && name.find_first_of("\r\n") == std::string::npos &&
+           description.find_first_of("\r\n") == std::string::npos;
+}
+
+std::optional<SkillMetadata> readSkillMetadata(const std::filesystem::path& path) {
+    std::error_code error;
+    const auto size = std::filesystem::file_size(path, error);
+    if (error || size > maximum_skill_file_bytes) return std::nullopt;
+
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return std::nullopt;
+
+    std::string line;
+    if (!std::getline(input, line) || trim(line) != "---") return std::nullopt;
+
+    FrontMatter front_matter = readFrontMatter(input);
+    if (!isValidFrontMatter(front_matter)) {
         return std::nullopt;
     }
 
     const std::filesystem::path absolute = std::filesystem::absolute(path, error);
     if (error) return std::nullopt;
-    return SkillMetadata{
-        .name = std::move(name), .description = std::move(description), .path = absolute.lexically_normal()};
+    return SkillMetadata{.name = std::move(front_matter.name),
+                         .description = std::move(front_matter.description),
+                         .path = absolute.lexically_normal()};
 }
 
 }  // namespace
 
 std::filesystem::path codexSkillsDirectory() {
-    if (const char* codex_home = std::getenv("CODEX_HOME"); codex_home != nullptr && codex_home[0] != '\0') {
+    if (const char* codex_home = std::getenv("CODEX_HOME"); codex_home != nullptr && *codex_home != '\0') {
         return std::filesystem::path(codex_home) / "skills";
     }
-    if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0') {
+    if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
         return std::filesystem::path(home) / ".codex" / "skills";
     }
     return {};
@@ -148,7 +172,7 @@ std::vector<SkillMetadata> discoverCodexSkills() {
     const auto options = std::filesystem::directory_options::follow_directory_symlink |
                          std::filesystem::directory_options::skip_permission_denied;
     std::filesystem::recursive_directory_iterator iterator(root, options, error);
-    std::filesystem::recursive_directory_iterator end;
+    const std::filesystem::recursive_directory_iterator end;
     while (!error && iterator != end && entries < maximum_skill_entries) {
         ++entries;
         const auto& entry = *iterator;

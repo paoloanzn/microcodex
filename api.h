@@ -37,7 +37,7 @@ struct CodexApiConfig {
     long idle_timeout_seconds = 300;
     std::size_t maximum_tool_rounds = 128;
     std::size_t maximum_parallel_tool_calls = 32;
-    std::size_t maximum_tool_output_bytes = 64 * 1024;
+    std::size_t maximum_tool_output_bytes = std::size_t{64} * 1024;
     // Maximum wall-clock time for a single tool call, measured from when the
     // call starts, so parallel stuck calls cannot stack their timeouts.
     // When a call exceeds it, the call is reported as a timeout error and
@@ -51,8 +51,8 @@ struct CodexApiConfig {
     CompactionConfig compaction{
         .context_limit_tokens = 258'400,
         .compact_at_tokens = 244'800,
-        .retained_context_tokens = 20 * 1024,
-        .maximum_summary_bytes = 32 * 1024,
+        .retained_context_tokens = std::size_t{20} * 1024,
+        .maximum_summary_bytes = std::size_t{32} * 1024,
     };
     bool persist_conversation = true;
     std::optional<std::filesystem::path> resume_conversation;
@@ -77,8 +77,11 @@ public:
     // and cancellation always travel through explicit methods below.
     CodexApi(CodexApiConfig config, CodexEventEmitter& events);
 
+    ~CodexApi() = default;
     CodexApi(const CodexApi&) = delete;
     CodexApi& operator=(const CodexApi&) = delete;
+    CodexApi(CodexApi&&) = delete;
+    CodexApi& operator=(CodexApi&&) = delete;
 
     std::expected<CodexApiResponse, std::string> sendUserMessage(std::string_view message);
 
@@ -109,7 +112,7 @@ private:
     struct ToolExecutionResult {
         CodexToolOutput output;
         std::shared_ptr<const EditResult> edit;
-        bool succeeded;
+        bool succeeded = false;
     };
 
     struct ModelResponse {

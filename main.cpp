@@ -1,14 +1,19 @@
 // SPDX-FileCopyrightText: 2026 Paolo Anzani
 // SPDX-License-Identifier: Apache-2.0
 
+#include <algorithm>
+#include <array>
 #include <charconv>
 #include <chrono>
+#include <cstddef>
 #include <cstdlib>
 #include <expected>
 #include <filesystem>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -34,9 +39,17 @@ constexpr std::string_view default_reasoning_effort = "medium";
 // "persistent", which the Responses API calls "disabled" (the official
 // client keeps "persistent" in local settings and sends "disabled"), and
 // "ultra", which maps to the gpt-6-sol wire top "max".
-constexpr std::string_view accepted_effort_values[] = {
-    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "persistent",
-};
+constexpr auto accepted_effort_values = std::to_array<std::string_view>({
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra",
+    "persistent",
+});
 
 std::string effortValueList() {
     std::string list;
@@ -95,63 +108,80 @@ struct AgentRequest {
     bool reasoning_effort_explicit = false;
 };
 
-std::expected<AgentRequest, std::string> parseAgentRequest(const int argc, char* argv[]) {
-    std::string model(default_model);
+struct AgentOptions {
+    std::string model{default_model};
     bool model_explicit = false;
-    std::string reasoning_effort(default_reasoning_effort);
+    std::string reasoning_effort{default_reasoning_effort};
     bool reasoning_effort_explicit = false;
-    int argument = 1;
-    while (argument < argc) {
-        const std::string_view flag(argv[argument]);
+};
+
+// Parse the leading --model and --effort options, advancing argument past them.
+std::expected<AgentOptions, std::string> parseAgentOptions(const std::span<char* const> arguments,
+                                                           std::size_t& argument) {
+    AgentOptions options;
+    while (argument < arguments.size()) {
+        const std::string_view flag(arguments[argument]);
         if (flag == "--model") {
-            if (++argument == argc) {
+            ++argument;
+            if (argument == arguments.size()) {
                 return std::unexpected("--model requires a model name");
             }
-            const std::string_view value(argv[argument]);
+            const std::string_view value(arguments[argument]);
             // An option-looking token is not a model name; --model is
             // still missing its value.
             if (value.empty() || value.starts_with("--")) {
                 return std::unexpected("--model requires a model name");
             }
-            model = argv[argument++];
-            model_explicit = true;
+            options.model = value;
+            ++argument;
+            options.model_explicit = true;
         } else if (flag == "--effort") {
-            if (++argument == argc) {
+            ++argument;
+            if (argument == arguments.size()) {
                 return std::unexpected("--effort requires an effort value (expected one of: " + effortValueList() +
                                        ")");
             }
-            auto resolved = resolveReasoningEffort(argv[argument], "--effort");
+            auto resolved = resolveReasoningEffort(arguments[argument], "--effort");
             if (!resolved) return std::unexpected(resolved.error());
-            reasoning_effort = std::move(*resolved);
+            options.reasoning_effort = std::move(*resolved);
             ++argument;
-            reasoning_effort_explicit = true;
+            options.reasoning_effort_explicit = true;
         } else {
             break;
         }
     }
+    return options;
+}
+
+std::expected<AgentRequest, std::string> parseAgentRequest(const std::span<char* const> arguments) {
+    std::size_t argument = 1;
+    auto options = parseAgentOptions(arguments, argument);
+    if (!options) return std::unexpected(options.error());
+
     std::optional<std::string> resume_id;
-    if (argument < argc && std::string_view(argv[argument]) == "resume") {
+    if (argument < arguments.size() && std::string_view(arguments[argument]) == "resume") {
         ++argument;
-        if (argument == argc || std::string_view(argv[argument]).empty()) {
+        if (argument == arguments.size() || std::string_view(arguments[argument]).empty()) {
             return std::unexpected("resume requires a conversation ID");
         }
-        resume_id = argv[argument++];
+        resume_id = arguments[argument];
+        ++argument;
     }
 
     std::string prompt;
-    for (; argument < argc; ++argument) {
+    for (const std::string_view word : arguments.subspan(std::min(argument, arguments.size()))) {
         if (!prompt.empty()) {
             prompt += ' ';
         }
-        prompt += argv[argument];
+        prompt += word;
     }
     return AgentRequest{
-        .model = std::move(model),
-        .model_explicit = model_explicit,
+        .model = std::move(options->model),
+        .model_explicit = options->model_explicit,
         .prompt = prompt.empty() ? std::nullopt : std::optional<std::string>(std::move(prompt)),
         .resume_id = std::move(resume_id),
-        .reasoning_effort = std::move(reasoning_effort),
-        .reasoning_effort_explicit = reasoning_effort_explicit,
+        .reasoning_effort = std::move(options->reasoning_effort),
+        .reasoning_effort_explicit = options->reasoning_effort_explicit,
     };
 }
 
@@ -163,7 +193,7 @@ std::expected<std::filesystem::path, std::string> conversationPath(const std::st
     if (!directory) return std::unexpected(directory.error());
     std::filesystem::path filename(id);
     if (filename.extension() != ".jsonl") filename += ".jsonl";
-    const std::filesystem::path path = *directory / filename;
+    std::filesystem::path path = *directory / filename;
     std::error_code error;
     if (!std::filesystem::is_regular_file(path, error)) {
         return std::unexpected("Conversation '" + std::string(id) + "' was not found");
@@ -193,20 +223,20 @@ std::expected<void, std::string> printSavedTurn(const microcodex::SavedTurn& tur
     for (const std::string& item : turn.items) {
         auto message = microcodex::responseMessage(item);
         if (!message) return std::unexpected(message.error());
-        if (*message) {
-            std::cout << (*message)->role << ": " << (*message)->text << '\n';
+        if (const auto& found = *message) {
+            std::cout << found->role << ": " << found->text << '\n';
             continue;
         }
         auto call = microcodex::responseToolCall(item);
         if (!call) return std::unexpected(call.error());
-        if (*call) {
-            std::cout << "tool " << (*call)->name << ": " << (*call)->arguments << '\n';
+        if (const auto& found = *call) {
+            std::cout << "tool " << found->name << ": " << found->arguments << '\n';
             continue;
         }
         auto output = microcodex::responseToolOutput(item);
         if (!output) return std::unexpected(output.error());
-        if (*output) {
-            std::cout << "tool output " << (*output)->call_id << ": " << (*output)->output << '\n';
+        if (const auto& found = *output) {
+            std::cout << "tool output " << found->call_id << ": " << found->output << '\n';
         }
     }
     return {};
@@ -257,7 +287,7 @@ int completeLogin(const std::expected<microcodex::OAuthCredentials, std::string>
     return 0;
 }
 
-int login() {
+int runLogin() {
     auto login = microcodex::OAuthLogin::start();
     if (!login) {
         std::cerr << "Login failed: " << login.error() << '\n';
@@ -287,7 +317,7 @@ int deviceLogin() {
     return completeLogin(microcodex::finishOAuthDeviceLogin(*login));
 }
 
-int logout() {
+int runLogout() {
     auto logged_out = microcodex::logoutOAuth();
     if (!logged_out) {
         std::cerr << "Logout failed: " << logged_out.error() << '\n';
@@ -333,11 +363,11 @@ int runPrompt(microcodex::CodexApiConfig config, const std::string_view prompt) 
 
 std::expected<void, std::string> applySizeEnvironment(const char* name, std::size_t& destination) {
     const char* text = std::getenv(name);
-    if (text == nullptr || text[0] == '\0') return {};
+    if (text == nullptr || *text == '\0') return {};
+    const std::string_view digits(text);
+    const char* const end = std::to_address(digits.end());
     std::size_t value = 0;
-    const char* end = text;
-    while (*end != '\0') ++end;
-    const auto [parsed_end, error] = std::from_chars(text, end, value);
+    const auto [parsed_end, error] = std::from_chars(std::to_address(digits.begin()), end, value);
     if (error != std::errc{} || parsed_end != end) {
         return std::unexpected(std::string(name) + " must be an unsigned integer");
     }
@@ -352,7 +382,7 @@ std::expected<void, std::string> applyToolTimeoutEnvironment(microcodex::CodexAp
     // Zero disables the timeout. Anything above a year is almost certainly
     // a mistake, and it would overflow std::chrono::seconds' signed
     // representation, silently disabling the timeout instead of erroring.
-    constexpr std::size_t one_year_seconds = 365 * 24 * 60 * 60;
+    constexpr std::size_t one_year_seconds = std::size_t{365} * 24 * 60 * 60;
     if (config.tool_execution_timeout_seconds > one_year_seconds) {
         return std::unexpected(
             "MICROCODEX_TOOL_EXECUTION_TIMEOUT_SECONDS must not exceed 31536000 (one year); use 0 to disable the "
@@ -392,88 +422,74 @@ std::expected<void, std::string> applyModelContextLimits(microcodex::CodexApiCon
     return {};
 }
 
-}  // namespace
-
-int main(const int argc, char* argv[]) {
-    const std::string_view executable = argc > 0 ? argv[0] : "microcodex";
-    if (argc > 1 && (std::string_view(argv[1]) == "--help" || std::string_view(argv[1]) == "-h")) {
+// Run the subcommands that do not start an agent session. Returns nullopt when
+// the arguments select an agent session instead.
+std::optional<int> runCommand(const std::span<char* const> arguments, const std::string_view executable) {
+    if (arguments.size() <= 1) return std::nullopt;
+    const std::string_view command(arguments[1]);
+    if (command == "--help" || command == "-h") {
         printUsage(executable);
         return 0;
     }
-    if (argc > 1 && std::string_view(argv[1]) == "login") {
-        if (argc == 2) return login();
-        if (argc == 3 && std::string_view(argv[2]) == "--device-auth") return deviceLogin();
+    if (command == "login") {
+        if (arguments.size() == 2) return runLogin();
+        if (arguments.size() == 3 && std::string_view(arguments[2]) == "--device-auth") return deviceLogin();
         printUsage(executable);
         return 1;
     }
-    if (argc > 1 && std::string_view(argv[1]) == "logout") {
-        return logout();
+    if (command == "logout") {
+        return runLogout();
     }
-    if (argc > 1 && std::string_view(argv[1]) == "list") {
+    if (command == "list") {
         return listSavedConversations();
     }
-    if (argc > 1 && std::string_view(argv[1]) == "show") {
-        if (argc != 3) {
+    if (command == "show") {
+        if (arguments.size() != 3) {
             std::cerr << "show requires one conversation ID\n";
             return 1;
         }
-        return showSavedConversation(argv[2]);
+        return showSavedConversation(arguments[2]);
     }
+    return std::nullopt;
+}
 
-    auto request = parseAgentRequest(argc, argv);
-    if (!request) {
-        std::cerr << request.error() << '\n';
-        printUsage(executable);
-        return 1;
-    }
+// For a resumed conversation, restore its model (unless --model was given)
+// and working directory, and return the path of its file.
+std::expected<std::optional<std::filesystem::path>, std::string> prepareResume(AgentRequest& request) {
+    const std::optional<std::string>& resume_id = request.resume_id;
+    if (!resume_id) return std::optional<std::filesystem::path>{};
 
-    std::optional<std::filesystem::path> resume_path;
-    if (request->resume_id) {
-        auto path = conversationPath(*request->resume_id);
-        if (!path) {
-            std::cerr << path.error() << '\n';
-            return 1;
-        }
-        auto metadata = microcodex::readConversationMetadata(*path);
-        if (!metadata) {
-            std::cerr << metadata.error() << '\n';
-            return 1;
-        }
-        if (!request->model_explicit) request->model = metadata->model;
+    auto path = conversationPath(*resume_id);
+    if (!path) return std::unexpected(path.error());
+    auto metadata = microcodex::readConversationMetadata(*path);
+    if (!metadata) return std::unexpected(metadata.error());
+    if (!request.model_explicit) request.model = metadata->model;
 
-        std::error_code error;
-        std::filesystem::current_path(metadata->working_directory, error);
-        if (error) {
-            std::cerr << "Could not restore conversation working directory: " << error.message() << '\n';
-            return 1;
-        }
-        resume_path = std::move(*path);
+    std::error_code error;
+    std::filesystem::current_path(metadata->working_directory, error);
+    if (error) {
+        return std::unexpected("Could not restore conversation working directory: " + error.message());
     }
-    auto credentials = microcodex::loadOAuthCredentials();
-    if (!credentials) {
-        std::cerr << "Could not load saved credentials: " << credentials.error() << '\n';
-        return 1;
-    }
-    if (!*credentials) {
-        std::cerr << "Not logged in. Run '" << executable << " login' first.\n";
-        return 1;
-    }
+    return std::optional<std::filesystem::path>{std::move(*path)};
+}
 
-    auto config = microcodex::makeCodingAgentConfig(std::move(request->model));
-    config.reasoning_effort = std::move(request->reasoning_effort);
+// Build the agent configuration from the request, the saved credentials and
+// the environment. A missing model catalog only prints a warning.
+std::expected<microcodex::CodexApiConfig, std::string> configureAgent(AgentRequest& request,
+                                                                      std::optional<std::filesystem::path> resume_path,
+                                                                      const microcodex::OAuthCredentials& credentials) {
+    auto config = microcodex::makeCodingAgentConfig(std::move(request.model));
+    config.reasoning_effort = std::move(request.reasoning_effort);
     config.resume_conversation = std::move(resume_path);
-    microcodex::applyOAuthCredentials(config, **credentials);
+    microcodex::applyOAuthCredentials(config, credentials);
     // Validate the effort before any network attempt so a bad value fails
     // with its own clear error instead of following a models-API warning.
-    auto effort_config = applyEffortEnvironment(config, request->reasoning_effort_explicit);
-    if (!effort_config) {
-        std::cerr << effort_config.error() << '\n';
-        return 1;
-    }
+    auto effort_config = applyEffortEnvironment(config, request.reasoning_effort_explicit);
+    if (!effort_config) return std::unexpected(effort_config.error());
     // Keep transport selection at the executable boundary so black-box tests
     // can exercise the real CLI against a deterministic loopback server. The
     // default remains the production Codex endpoint.
-    if (const char* endpoint = std::getenv("MICROCODEX_API_ENDPOINT"); endpoint != nullptr && endpoint[0] != '\0') {
+    if (const char* endpoint = std::getenv("MICROCODEX_API_ENDPOINT"); endpoint != nullptr && *endpoint != '\0') {
         config.endpoint = endpoint;
     }
     auto model_context = applyModelContextLimits(config);
@@ -481,18 +497,58 @@ int main(const int argc, char* argv[]) {
         std::cerr << "Warning: " << model_context.error() << ". Using built-in context limits.\n";
     }
     auto configured = applyConversationEnvironment(config);
-    if (!configured) {
-        std::cerr << configured.error() << '\n';
+    if (!configured) return std::unexpected(configured.error());
+    return config;
+}
+
+int runAgent(const std::span<char* const> arguments, const std::string_view executable) {
+    auto request = parseAgentRequest(arguments);
+    if (!request) {
+        std::cerr << request.error() << '\n';
+        printUsage(executable);
         return 1;
     }
-    if (request->prompt) {
-        return runPrompt(std::move(config), *request->prompt);
+
+    auto resume_path = prepareResume(*request);
+    if (!resume_path) {
+        std::cerr << resume_path.error() << '\n';
+        return 1;
+    }
+    auto credentials = microcodex::loadOAuthCredentials();
+    if (!credentials) {
+        std::cerr << "Could not load saved credentials: " << credentials.error() << '\n';
+        return 1;
+    }
+    const std::optional<microcodex::OAuthCredentials>& saved_credentials = *credentials;
+    if (!saved_credentials) {
+        std::cerr << "Not logged in. Run '" << executable << " login' first.\n";
+        return 1;
     }
 
-    auto result = microcodex::runInteractive(std::move(config));
+    auto config = configureAgent(*request, std::move(*resume_path), *saved_credentials);
+    if (!config) {
+        std::cerr << config.error() << '\n';
+        return 1;
+    }
+    if (const std::optional<std::string>& prompt = request->prompt) {
+        return runPrompt(std::move(*config), *prompt);
+    }
+
+    auto result = microcodex::runInteractive(std::move(*config));
     if (!result) {
         std::cerr << result.error() << '\n';
         return 1;
     }
     return 0;
+}
+
+}  // namespace
+
+int main(const int argc, char* argv[]) {
+    const std::span<char* const> arguments(argv, static_cast<std::size_t>(argc));
+    const std::string_view executable = arguments.empty() ? std::string_view("microcodex") : arguments.front();
+    if (const std::optional<int> status = runCommand(arguments, executable)) {
+        return *status;
+    }
+    return runAgent(arguments, executable);
 }

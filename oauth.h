@@ -81,6 +81,10 @@ public:
 private:
     struct Impl;
     explicit OAuthLogin(std::unique_ptr<Impl> implementation);
+    // Answers one browser request. Returns nothing while the login should keep
+    // waiting, or the final result once a callback ends it.
+    std::optional<std::expected<OAuthCredentials, std::string>> handleCallback(
+        int connection, std::chrono::steady_clock::time_point deadline);
     std::unique_ptr<Impl> implementation_;
 };
 

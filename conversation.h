@@ -99,6 +99,7 @@ private:
     ConversationFile(std::filesystem::path path, int descriptor, std::uint64_t file_size);
 
     std::expected<void, std::string> appendRecord(std::string_view record);
+    std::expected<void, std::string> removeUnterminatedTail(std::uint64_t record_offset);
     [[nodiscard]] std::expected<SavedTurn, std::string> readTurn(const TurnLocation& location) const;
 
     std::filesystem::path path_;

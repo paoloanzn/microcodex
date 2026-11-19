@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <expected>
 #include <span>
 #include <stop_token>
@@ -12,7 +13,7 @@
 
 namespace microcodex {
 
-enum class HttpMethod {
+enum class HttpMethod : std::uint8_t {
     Get,
     Post,
 };

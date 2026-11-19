@@ -8,18 +8,23 @@
 #include <termbox2.h>
 
 #include <algorithm>
-#include <cstring>
+#include <cstddef>
+#include <string_view>
 
 #include "terminal.h"
 
 namespace {
 
+// The bytes termbox has read but not yet parsed into events.
+std::string_view pendingInput() { return {global.in.buf, global.in.len}; }
+
 int extractMetaComposerKey(tb_event* event, std::size_t* consumed) {
-    if (global.in.len < 2 || global.in.buf[0] != '\x1b') {
+    const std::string_view input = pendingInput();
+    if (input.size() < 2 || input[0] != '\x1b') {
         return TB_ERR;
     }
 
-    const auto key = static_cast<unsigned char>(global.in.buf[1]);
+    const auto key = static_cast<unsigned char>(input[1]);
     if (key != 'b' && key != 'B' && key != 'f' && key != 'F' && key != TB_KEY_BACKSPACE && key != TB_KEY_BACKSPACE2) {
         return TB_ERR;
     }
@@ -40,17 +45,18 @@ int extractMetaComposerKey(tb_event* event, std::size_t* consumed) {
 // keys need the same treatment in TB_INPUT_ESC mode: many terminals send
 // Option combinations as an Escape-prefixed pair, which termbox otherwise
 // splits into a standalone Escape and an unmodified key.
-int extractPasteMarker(tb_event* event, std::size_t* consumed, const char* marker, const std::size_t length,
+int extractPasteMarker(tb_event* event, std::size_t* consumed, const std::string_view marker,
                        const unsigned char event_type) {
-    const std::size_t compared = std::min(global.in.len, length);
-    if (std::memcmp(global.in.buf, marker, compared) != 0) {
+    const std::string_view input = pendingInput();
+    const std::size_t compared = std::min(input.size(), marker.size());
+    if (input.substr(0, compared) != marker.substr(0, compared)) {
         return TB_ERR;
     }
-    if (global.in.len < length) {
+    if (input.size() < marker.size()) {
         return TB_ERR_NEED_MORE;
     }
     event->type = event_type;
-    *consumed = length;
+    *consumed = marker.size();
     return TB_OK;
 }
 
@@ -60,15 +66,14 @@ int extractCustomInput(tb_event* event, std::size_t* consumed) {
         return meta_result;
     }
 
-    constexpr char start[] = "\x1b[200~";
-    constexpr char end[] = "\x1b[201~";
+    constexpr std::string_view start = "\x1b[200~";
+    constexpr std::string_view end = "\x1b[201~";
 
-    const int start_result =
-        extractPasteMarker(event, consumed, start, sizeof(start) - 1, microcodex::terminal::paste_start_event);
+    const int start_result = extractPasteMarker(event, consumed, start, microcodex::terminal::paste_start_event);
     if (start_result != TB_ERR) {
         return start_result;
     }
-    return extractPasteMarker(event, consumed, end, sizeof(end) - 1, microcodex::terminal::paste_end_event);
+    return extractPasteMarker(event, consumed, end, microcodex::terminal::paste_end_event);
 }
 
 }  // namespace

@@ -4,6 +4,7 @@
 #include "shell-highlight.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstddef>
 #include <string_view>
@@ -27,18 +28,18 @@ bool isShellOperator(const char character) {
 }
 
 bool isKeyword(const std::string_view word) {
-    constexpr std::string_view keywords[] = {
+    constexpr std::array<std::string_view, 16> keywords = {
         "case",     "do", "done", "elif",   "else", "esac", "fi",    "for",
         "function", "if", "in",   "select", "then", "time", "until", "while",
     };
-    return std::ranges::find(keywords, word) != std::end(keywords);
+    return std::ranges::find(keywords, word) != keywords.end();
 }
 
 bool keywordStartsCommand(const std::string_view word) {
-    constexpr std::string_view command_keywords[] = {
+    constexpr std::array<std::string_view, 8> command_keywords = {
         "do", "elif", "else", "if", "then", "time", "until", "while",
     };
-    return std::ranges::find(command_keywords, word) != std::end(command_keywords);
+    return std::ranges::find(command_keywords, word) != command_keywords.end();
 }
 
 bool isAssignment(const std::string_view word) {
@@ -109,12 +110,12 @@ std::size_t variableEnd(const std::string_view source, const std::size_t start) 
 }
 
 std::size_t operatorEnd(const std::string_view source, const std::size_t start) {
-    constexpr std::string_view pairs[] = {
+    constexpr std::array<std::string_view, 8> pairs = {
         "&&", "||", ">>", "<<", ";;", "|&", ">&", "<&",
     };
     if (start + 2 <= source.size()) {
         const std::string_view pair = source.substr(start, 2);
-        if (std::ranges::find(pairs, pair) != std::end(pairs)) {
+        if (std::ranges::find(pairs, pair) != pairs.end()) {
             return start + 2;
         }
     }
@@ -126,110 +127,117 @@ bool operatorStartsCommand(const std::string_view value) {
            value == "&&" || value == "(";
 }
 
+bool isSpace(const char character) { return std::isspace(static_cast<unsigned char>(character)) != 0; }
+
+bool endsWord(const char character) {
+    return isSpace(character) || isShellOperator(character) || character == '\'' || character == '"' ||
+           character == '$' || character == '\\';
+}
+
+// Tokenizes one shell source string into styled spans. Words are colored by
+// role: the first word of each command, keywords, options and assignments.
+class ShellHighlighter {
+public:
+    explicit ShellHighlighter(const std::string_view source) : source_(source) {}
+
+    std::vector<microcodex::ui::StyledSpan> run() && {
+        while (position_ < source_.size()) {
+            const char character = source_[position_];
+            if (isSpace(character)) {
+                appendWhitespace();
+            } else if (character == '#' && at_word_start_) {
+                appendComment();
+            } else if (character == '\'' || character == '"') {
+                appendWordPart(quotedEnd(source_, position_), string_style);
+            } else if (character == '$') {
+                appendWordPart(variableEnd(source_, position_), variable_style);
+            } else if (character == '\\' && position_ + 1 < source_.size()) {
+                appendWordPart(position_ + 2, string_style);
+            } else if (isShellOperator(character) && character != ' ') {
+                appendOperator();
+            } else {
+                appendWord();
+            }
+        }
+        return std::move(line_.spans);
+    }
+
+private:
+    void append(const std::size_t end, const uintattr_t style = TB_DEFAULT) {
+        microcodex::ui::appendSpan(line_, source_.substr(position_, end - position_), style);
+        position_ = end;
+    }
+
+    void appendWhitespace() {
+        std::size_t end = position_;
+        while (end < source_.size() && isSpace(source_[end])) {
+            if (source_[end] == '\n') {
+                expect_command_ = true;
+            }
+            ++end;
+        }
+        append(end);
+        at_word_start_ = true;
+    }
+
+    void appendComment() {
+        const std::size_t end = source_.find('\n', position_);
+        append(end == std::string_view::npos ? source_.size() : end, comment_style);
+    }
+
+    // Quotes, variables and escapes are part of a word; one at the start of a
+    // command stands in for the command name.
+    void appendWordPart(const std::size_t end, const uintattr_t style) {
+        append(end, style);
+        if (at_word_start_ && expect_command_) {
+            expect_command_ = false;
+        }
+        at_word_start_ = false;
+    }
+
+    void appendOperator() {
+        const std::size_t end = operatorEnd(source_, position_);
+        const std::string_view value = source_.substr(position_, end - position_);
+        append(end, operator_style);
+        if (operatorStartsCommand(value)) {
+            expect_command_ = true;
+        }
+        at_word_start_ = true;
+    }
+
+    void appendWord() {
+        std::size_t end = position_ + 1;
+        while (end < source_.size() && !endsWord(source_[end])) {
+            ++end;
+        }
+        const std::string_view word = source_.substr(position_, end - position_);
+        if (isKeyword(word)) {
+            append(end, keyword_style);
+            expect_command_ = keywordStartsCommand(word);
+        } else if (expect_command_ && isAssignment(word)) {
+            append(end, variable_style);
+        } else if (expect_command_) {
+            append(end, command_style);
+            expect_command_ = false;
+        } else if (word.starts_with('-')) {
+            append(end, option_style);
+        } else {
+            append(end);
+        }
+        at_word_start_ = false;
+    }
+
+    std::string_view source_;
+    std::size_t position_ = 0;
+    microcodex::ui::StyledLine line_;
+    bool expect_command_ = true;
+    bool at_word_start_ = true;
+};
+
 }  // namespace
 
 namespace microcodex::ui {
 
-std::vector<StyledSpan> highlightShell(const std::string_view source) {
-    StyledLine line;
-    bool expect_command = true;
-    bool at_word_start = true;
-
-    for (std::size_t position = 0; position < source.size();) {
-        const char character = source[position];
-
-        if (std::isspace(static_cast<unsigned char>(character)) != 0) {
-            if (character == '\n') {
-                expect_command = true;
-            }
-            const std::size_t start = position++;
-            while (position < source.size() && std::isspace(static_cast<unsigned char>(source[position])) != 0) {
-                if (source[position] == '\n') {
-                    expect_command = true;
-                }
-                ++position;
-            }
-            appendSpan(line, source.substr(start, position - start));
-            at_word_start = true;
-            continue;
-        }
-
-        if (character == '#' && at_word_start) {
-            const std::size_t end = source.find('\n', position);
-            const std::size_t length = end == std::string_view::npos ? source.size() - position : end - position;
-            appendSpan(line, source.substr(position, length), comment_style);
-            position += length;
-            continue;
-        }
-
-        if (character == '\'' || character == '"') {
-            const std::size_t end = quotedEnd(source, position);
-            appendSpan(line, source.substr(position, end - position), string_style);
-            if (at_word_start && expect_command) {
-                expect_command = false;
-            }
-            position = end;
-            at_word_start = false;
-            continue;
-        }
-
-        if (character == '$') {
-            const std::size_t end = variableEnd(source, position);
-            appendSpan(line, source.substr(position, end - position), variable_style);
-            if (at_word_start && expect_command) {
-                expect_command = false;
-            }
-            position = end;
-            at_word_start = false;
-            continue;
-        }
-
-        if (character == '\\' && position + 1 < source.size()) {
-            appendSpan(line, source.substr(position, 2), string_style);
-            if (at_word_start && expect_command) {
-                expect_command = false;
-            }
-            position += 2;
-            at_word_start = false;
-            continue;
-        }
-
-        if (isShellOperator(character) && character != ' ') {
-            const std::size_t end = operatorEnd(source, position);
-            const std::string_view value = source.substr(position, end - position);
-            appendSpan(line, value, operator_style);
-            if (operatorStartsCommand(value)) {
-                expect_command = true;
-            }
-            position = end;
-            at_word_start = true;
-            continue;
-        }
-
-        const std::size_t start = position++;
-        while (position < source.size() && std::isspace(static_cast<unsigned char>(source[position])) == 0 &&
-               !isShellOperator(source[position]) && source[position] != '\'' && source[position] != '"' &&
-               source[position] != '$' && source[position] != '\\') {
-            ++position;
-        }
-        const std::string_view word = source.substr(start, position - start);
-        if (isKeyword(word)) {
-            appendSpan(line, word, keyword_style);
-            expect_command = keywordStartsCommand(word);
-        } else if (expect_command && isAssignment(word)) {
-            appendSpan(line, word, variable_style);
-        } else if (expect_command) {
-            appendSpan(line, word, command_style);
-            expect_command = false;
-        } else if (word.starts_with('-')) {
-            appendSpan(line, word, option_style);
-        } else {
-            appendSpan(line, word);
-        }
-        at_word_start = false;
-    }
-
-    return std::move(line.spans);
-}
+std::vector<StyledSpan> highlightShell(const std::string_view source) { return ShellHighlighter(source).run(); }
 
 }  // namespace microcodex::ui

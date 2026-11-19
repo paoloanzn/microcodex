@@ -11,7 +11,6 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -48,7 +47,7 @@ std::vector<Line> splitLines(const std::string& text) {
         const std::size_t newline = text.find('\n', begin);
         const std::size_t text_end = newline == std::string::npos ? text.size() : newline;
         const std::size_t end = newline == std::string::npos ? text.size() : newline + 1;
-        std::string_view line{text.data() + begin, text_end - begin};
+        std::string_view line = std::string_view(text).substr(begin, text_end - begin);
         if (!line.empty() && line.back() == '\r') {
             line.remove_suffix(1);
         }
@@ -86,43 +85,78 @@ struct ChangedRange {
     std::size_t new_last;
 };
 
+struct ReplacementLengths {
+    std::size_t old_length;
+    std::size_t new_length;
+};
+
+struct EditLines {
+    std::vector<Line> old_lines;
+    std::vector<Line> new_lines;
+};
+
+// Find the old and new lines touched by one replacement. position holds the
+// replacement's offset in the old text and in the new text.
+ChangedRange changedRange(const EditLines& lines, const std::pair<std::size_t, std::size_t>& position,
+                          const ReplacementLengths lengths) {
+    const auto& [old_begin, new_begin] = position;
+    const std::size_t old_end = old_begin + lengths.old_length;
+    const auto [old_first, old_last] = overlappingLines(lines.old_lines, old_begin, old_end);
+
+    if (lengths.new_length != 0) {
+        const auto [new_first, new_last] = overlappingLines(lines.new_lines, new_begin, new_begin + lengths.new_length);
+        return {.old_first = old_first, .old_last = old_last, .new_first = new_first, .new_last = new_last};
+    }
+
+    std::size_t new_first = insertionLine(lines.new_lines, new_begin);
+    std::size_t new_last = new_first;
+
+    // Removing complete lines needs no added line. A partial-line
+    // removal changes the remaining line, so show that new line.
+    const bool removes_complete_lines = old_first < old_last && old_begin == lines.old_lines[old_first].begin &&
+                                        old_end == lines.old_lines[old_last - 1].end;
+    if (!removes_complete_lines && !lines.new_lines.empty()) {
+        if (new_first == lines.new_lines.size()) {
+            new_first = lines.new_lines.size() - 1;
+        }
+        new_last = new_first + 1;
+    }
+    return {.old_first = old_first, .old_last = old_last, .new_first = new_first, .new_last = new_last};
+}
+
+microcodex::EditHunk makeHunk(const EditLines& lines, const ChangedRange& range) {
+    const std::vector<Line>& new_lines = lines.new_lines;
+    microcodex::EditHunk hunk{
+        .old_start = range.old_first + 1,
+        .new_start = range.new_first + 1,
+        .context_before =
+            range.new_first == 0 ? std::nullopt : std::optional<std::string>(new_lines[range.new_first - 1].text),
+        .removed_lines = {},
+        .added_lines = {},
+        .context_after = range.new_last < new_lines.size() ? std::optional<std::string>(new_lines[range.new_last].text)
+                                                           : std::nullopt,
+    };
+    for (std::size_t index = range.old_first; index < range.old_last; ++index) {
+        hunk.removed_lines.emplace_back(lines.old_lines[index].text);
+    }
+    for (std::size_t index = range.new_first; index < range.new_last; ++index) {
+        hunk.added_lines.emplace_back(new_lines[index].text);
+    }
+    return hunk;
+}
+
 std::vector<microcodex::EditHunk> makeHunks(const std::string& before, const std::string& after,
                                             const std::vector<std::pair<std::size_t, std::size_t>>& positions,
-                                            const std::size_t old_length, const std::size_t new_length) {
+                                            const ReplacementLengths lengths) {
     if (before == after) {
         return {};
     }
 
-    const std::vector<Line> old_lines = splitLines(before);
-    const std::vector<Line> new_lines = splitLines(after);
+    const EditLines lines{.old_lines = splitLines(before), .new_lines = splitLines(after)};
     std::vector<ChangedRange> ranges;
 
-    for (const auto& [old_begin, new_begin] : positions) {
-        const std::size_t old_end = old_begin + old_length;
-        const auto [old_first, old_last] = overlappingLines(old_lines, old_begin, old_end);
-
-        std::size_t new_first;
-        std::size_t new_last;
-        if (new_length != 0) {
-            std::tie(new_first, new_last) = overlappingLines(new_lines, new_begin, new_begin + new_length);
-        } else {
-            new_first = insertionLine(new_lines, new_begin);
-            new_last = new_first;
-
-            // Removing complete lines needs no added line. A partial-line
-            // removal changes the remaining line, so show that new line.
-            const bool removes_complete_lines = old_first < old_last && old_begin == old_lines[old_first].begin &&
-                                                old_end == old_lines[old_last - 1].end;
-            if (!removes_complete_lines && !new_lines.empty()) {
-                if (new_first == new_lines.size()) {
-                    new_first = new_lines.size() - 1;
-                }
-                new_last = new_first + 1;
-            }
-        }
-
-        const ChangedRange range{
-            .old_first = old_first, .old_last = old_last, .new_first = new_first, .new_last = new_last};
+    for (const auto& position : positions) {
+        const ChangedRange range = changedRange(lines, position, lengths);
         if (!ranges.empty() && range.old_first <= ranges.back().old_last && range.new_first <= ranges.back().new_last) {
             ranges.back().old_last = std::max(ranges.back().old_last, range.old_last);
             ranges.back().new_last = std::max(ranges.back().new_last, range.new_last);
@@ -134,24 +168,7 @@ std::vector<microcodex::EditHunk> makeHunks(const std::string& before, const std
     std::vector<microcodex::EditHunk> hunks;
     hunks.reserve(ranges.size());
     for (const ChangedRange& range : ranges) {
-        microcodex::EditHunk hunk{
-            .old_start = range.old_first + 1,
-            .new_start = range.new_first + 1,
-            .context_before =
-                range.new_first == 0 ? std::nullopt : std::optional<std::string>(new_lines[range.new_first - 1].text),
-            .removed_lines = {},
-            .added_lines = {},
-            .context_after = range.new_last < new_lines.size()
-                                 ? std::optional<std::string>(new_lines[range.new_last].text)
-                                 : std::nullopt,
-        };
-        for (std::size_t index = range.old_first; index < range.old_last; ++index) {
-            hunk.removed_lines.emplace_back(old_lines[index].text);
-        }
-        for (std::size_t index = range.new_first; index < range.new_last; ++index) {
-            hunk.added_lines.emplace_back(new_lines[index].text);
-        }
-        hunks.push_back(std::move(hunk));
+        hunks.push_back(makeHunk(lines, range));
     }
     return hunks;
 }
@@ -161,7 +178,7 @@ std::vector<microcodex::EditHunk> makeHunks(const std::string& before, const std
 namespace microcodex {
 
 std::expected<EditResult, std::string> edit(const std::string& path, const std::string_view old_content,
-                                            const std::string_view new_content, const bool replaceAll) {
+                                            const std::string_view new_content, const bool replace_all) {
     if (!doesFileExist(path)) {
         return std::unexpected("File not found");
     }
@@ -179,10 +196,10 @@ std::expected<EditResult, std::string> edit(const std::string& path, const std::
     if (matches.empty()) {
         return std::unexpected("Content not found");
     }
-    if (!replaceAll && matches.size() != 1) {
+    if (!replace_all && matches.size() != 1) {
         return std::unexpected("Content occurs more than once; use replace_all to replace every occurrence");
     }
-    if (!replaceAll) {
+    if (!replace_all) {
         matches.resize(1);
     }
 
@@ -200,9 +217,10 @@ std::expected<EditResult, std::string> edit(const std::string& path, const std::
         positions.emplace_back(match, new_position);
         cursor = match + old_content.size();
     }
-    content.append(*file_content, cursor, std::string::npos);
+    content.append(std::string_view(*file_content).substr(cursor));
 
-    std::vector<EditHunk> hunks = makeHunks(*file_content, content, positions, old_content.size(), new_content.size());
+    std::vector<EditHunk> hunks = makeHunks(*file_content, content, positions,
+                                            {.old_length = old_content.size(), .new_length = new_content.size()});
 
     std::ofstream file(path, std::ios::out | std::ios::trunc);
     if (!file) {

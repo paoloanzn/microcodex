@@ -162,7 +162,7 @@ std::expected<PreparedCompaction, std::string> ContextCompactor::prepare(const C
     return prepared;
 }
 
-std::string_view ContextCompactor::summaryInstructions() const { return summary_instructions; }
+std::string_view ContextCompactor::summaryInstructions() { return summary_instructions; }
 
 std::size_t estimateContextTokens(const std::span<const std::string> items) {
     std::size_t bytes = 0;

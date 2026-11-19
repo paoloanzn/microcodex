@@ -23,5 +23,5 @@ void appendJsonString(std::string& json, std::string_view value);
 
 std::expected<std::string_view, std::string> scalarMember(std::string_view object, std::string_view name);
 std::expected<std::string, std::string> string(std::string_view value);
-void appendString(std::string& json, std::string_view value);
+void appendString(std::string& output, std::string_view value);
 }  // namespace microcodex::json

@@ -119,6 +119,8 @@ public:
     }
 
 private:
+    // md4c fixes these callback signatures, including the adjacent void* parameters.
+    // NOLINTBEGIN(bugprone-easily-swappable-parameters)
     static int enterBlockCallback(const MD_BLOCKTYPE type, void* detail, void* userdata) noexcept {
         return callSafely(userdata, [=](MarkdownRenderer& renderer) { renderer.enterBlock(type, detail); });
     }
@@ -134,6 +136,7 @@ private:
     static int leaveSpanCallback(const MD_SPANTYPE type, void* detail, void* userdata) noexcept {
         return callSafely(userdata, [=](MarkdownRenderer& renderer) { renderer.leaveSpan(type, detail); });
     }
+    // NOLINTEND(bugprone-easily-swappable-parameters)
 
     static int textCallback(const MD_TEXTTYPE type, const MD_CHAR* text, const MD_SIZE size, void* userdata) noexcept {
         return callSafely(userdata,
@@ -414,7 +417,7 @@ private:
         return style;
     }
 
-    [[nodiscard]] uintattr_t spanStyle(const MD_SPANTYPE type) const {
+    [[nodiscard]] static uintattr_t spanStyle(const MD_SPANTYPE type) {
         switch (type) {
             case MD_SPAN_EM: return TB_ITALIC;
             case MD_SPAN_STRONG: return TB_BOLD;
@@ -479,7 +482,7 @@ private:
         }
     }
 
-    [[nodiscard]] std::vector<std::size_t> tableWidths(const std::vector<TableState::Row>& rows) const {
+    [[nodiscard]] static std::vector<std::size_t> tableWidths(const std::vector<TableState::Row>& rows) {
         std::size_t columns = 0;
         for (const TableState::Row& row : rows) {
             columns = std::max(columns, row.size());

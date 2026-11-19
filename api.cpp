@@ -68,15 +68,17 @@ std::string makeUuid() {
     bytes[6] = static_cast<unsigned char>((bytes[6] & 0x0f) | 0x40);
     bytes[8] = static_cast<unsigned char>((bytes[8] & 0x3f) | 0x80);
 
-    constexpr char hex[] = "0123456789abcdef";
+    constexpr std::string_view hex = "0123456789abcdef";
     std::string uuid;
     uuid.reserve(36);
-    for (std::size_t index = 0; index < bytes.size(); ++index) {
+    std::size_t index = 0;
+    for (const unsigned char byte : bytes) {
         if (index == 4 || index == 6 || index == 8 || index == 10) {
             uuid += '-';
         }
-        uuid += hex[bytes[index] >> 4];
-        uuid += hex[bytes[index] & 0x0f];
+        uuid += hex[byte >> 4];
+        uuid += hex[byte & 0x0f];
+        ++index;
     }
     return uuid;
 }
@@ -85,9 +87,8 @@ bool containsNewline(const std::string_view value) { return value.find_first_of(
 
 std::optional<std::size_t> unsignedJsonValue(const std::string_view value) {
     std::size_t result = 0;
-    const char* begin = value.data();
-    const char* end = begin + value.size();
-    const auto [parsed_end, error] = std::from_chars(begin, end, result);
+    const char* end = std::to_address(value.cend());
+    const auto [parsed_end, error] = std::from_chars(std::to_address(value.cbegin()), end, result);
     if (error != std::errc{} || parsed_end != end) return std::nullopt;
     return result;
 }
@@ -96,13 +97,15 @@ std::string currentTimestamp() {
     const std::time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     std::tm utc{};
 #ifdef _WIN32
-    gmtime_s(&utc, &now);
+    const bool converted = gmtime_s(&utc, &now) == 0;
 #else
-    gmtime_r(&now, &utc);
+    const bool converted = gmtime_r(&now, &utc) != nullptr;
 #endif
-    char timestamp[32]{};
-    std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ", &utc);
-    return timestamp;
+    std::array<char, 32> timestamp{};
+    if (!converted || std::strftime(timestamp.data(), timestamp.size(), "%Y-%m-%dT%H:%M:%SZ", &utc) == 0) {
+        return {};
+    }
+    return timestamp.data();
 }
 
 std::string boundedToolOutput(std::string output, const std::size_t maximum_bytes) {
@@ -167,6 +170,140 @@ void emitTextDelta(StreamState& state, const std::string_view text) {
     });
 }
 
+// Returns object[key], or nullopt when the member is missing or the object
+// cannot be parsed. Used where a missing value only selects a fallback.
+std::optional<std::string_view> optionalMember(const std::string_view object, const std::string_view key) {
+    auto member = findJsonMember(object, key);
+    if (!member) return std::nullopt;
+    return *member;
+}
+
+// Returns the string object[key], or nullopt when it is missing or invalid.
+std::optional<std::string> optionalStringMember(const std::string_view object, const std::string_view key) {
+    auto member = jsonStringMember(object, key);
+    if (!member) return std::nullopt;
+    return std::move(*member);
+}
+
+// Names a string member of a nested object: object[outer][key].
+struct NestedMember {
+    std::string_view outer;
+    std::string_view key;
+};
+
+// Returns object[outer][key] as a string when every level is present.
+std::optional<std::string> nestedStringMember(const std::string_view object, const NestedMember& member) {
+    const std::optional<std::string_view> nested = optionalMember(object, member.outer);
+    if (!nested) return std::nullopt;
+    return optionalStringMember(*nested, member.key);
+}
+
+std::expected<void, std::string> handleOutputTextDelta(const std::string_view data, StreamState& state) {
+    auto delta = requiredJsonString(data, "delta");
+    if (!delta) {
+        return std::unexpected(delta.error());
+    }
+    state.response.text += *delta;
+    emitTextDelta(state, *delta);
+    return {};
+}
+
+std::expected<void, std::string> handleOutputItemDone(const std::string_view data, StreamState& state) {
+    auto item = findJsonMember(data, "item");
+    if (!item) {
+        return std::unexpected(item.error());
+    }
+    const std::optional<std::string_view>& item_member = *item;
+    if (!item_member) {
+        return std::unexpected("response.output_item.done has no item");
+    }
+
+    // Keep the exact response item. Since requests use store=false, the
+    // next sampling request must replay model messages, reasoning, and
+    // function calls exactly as the server returned them.
+    const std::string_view item_json = *item_member;
+    state.output_items.emplace_back(item_json);
+
+    auto item_type = requiredJsonString(item_json, "type");
+    if (!item_type) {
+        return std::unexpected(item_type.error());
+    }
+    if (*item_type == "function_call") {
+        auto call_id = requiredJsonString(item_json, "call_id");
+        auto name = requiredJsonString(item_json, "name");
+        auto arguments = requiredJsonString(item_json, "arguments");
+        if (!call_id || !name || !arguments) {
+            return std::unexpected("Invalid function_call response item");
+        }
+        state.response.tool_calls.push_back({std::move(*call_id), std::move(*name), std::move(*arguments)});
+    } else if (*item_type == "message") {
+        auto message = microcodex::responseMessage(item_json);
+        if (!message) {
+            return std::unexpected(message.error());
+        }
+        const auto& message_value = *message;
+        if (message_value) {
+            state.fallback_text += message_value->text;
+        }
+    }
+    return {};
+}
+
+std::expected<void, std::string> handleResponseCompleted(const std::string_view data, StreamState& state) {
+    auto response = findJsonMember(data, "response");
+    if (!response) {
+        return std::unexpected(response.error());
+    }
+    const std::optional<std::string_view>& response_json = *response;
+    if (!response_json) {
+        return std::unexpected("response.completed has no response");
+    }
+
+    // Some compatible endpoints omit output_text.delta and provide
+    // only the final message item. Emit that fallback exactly once.
+    if (state.response.text.empty() && !state.fallback_text.empty()) {
+        state.response.text = state.fallback_text;
+        emitTextDelta(state, state.fallback_text);
+    }
+    if (const std::optional<std::string_view> usage = optionalMember(*response_json, "usage")) {
+        if (const std::optional<std::string_view> input_tokens = optionalMember(*usage, "input_tokens")) {
+            state.response.input_tokens = unsignedJsonValue(*input_tokens).value_or(0);
+        }
+    }
+    state.completed = true;
+    return {};
+}
+
+std::string responseFailedMessage(const std::string_view data) {
+    if (const std::optional<std::string_view> response = optionalMember(data, "response")) {
+        if (std::optional<std::string> message = nestedStringMember(*response, {.outer = "error", .key = "message"})) {
+            return std::move(*message);
+        }
+    }
+    return "The Codex response failed";
+}
+
+std::string responseIncompleteMessage(const std::string_view data) {
+    std::string reason = "unknown reason";
+    if (const std::optional<std::string_view> response = optionalMember(data, "response")) {
+        if (std::optional<std::string> value =
+                nestedStringMember(*response, {.outer = "incomplete_details", .key = "reason"})) {
+            reason = std::move(*value);
+        }
+    }
+    return std::string(incomplete_response_prefix) + reason;
+}
+
+std::string errorEventMessage(const std::string_view data) {
+    if (std::optional<std::string> message = nestedStringMember(data, {.outer = "error", .key = "message"})) {
+        return std::move(*message);
+    }
+    if (std::optional<std::string> message = optionalStringMember(data, "message")) {
+        return std::move(*message);
+    }
+    return "The Codex API returned an error event";
+}
+
 std::expected<void, std::string> handleEvent(const std::string_view data, StreamState& state) {
     if (data.empty() || data == "[DONE]") {
         return {};
@@ -177,124 +314,12 @@ std::expected<void, std::string> handleEvent(const std::string_view data, Stream
         return std::unexpected("Invalid Responses API event: " + type.error());
     }
 
-    if (*type == "response.output_text.delta") {
-        auto delta = requiredJsonString(data, "delta");
-        if (!delta) {
-            return std::unexpected(delta.error());
-        }
-        state.response.text += *delta;
-        emitTextDelta(state, *delta);
-        return {};
-    }
-
-    if (*type == "response.output_item.done") {
-        auto item = findJsonMember(data, "item");
-        if (!item) {
-            return std::unexpected(item.error());
-        }
-        if (!*item) {
-            return std::unexpected("response.output_item.done has no item");
-        }
-
-        // Keep the exact response item. Since requests use store=false, the
-        // next sampling request must replay model messages, reasoning, and
-        // function calls exactly as the server returned them.
-        const std::string_view item_json = **item;
-        state.output_items.emplace_back(item_json);
-
-        auto item_type = requiredJsonString(item_json, "type");
-        if (!item_type) {
-            return std::unexpected(item_type.error());
-        }
-        if (*item_type == "function_call") {
-            auto call_id = requiredJsonString(item_json, "call_id");
-            auto name = requiredJsonString(item_json, "name");
-            auto arguments = requiredJsonString(item_json, "arguments");
-            if (!call_id || !name || !arguments) {
-                return std::unexpected("Invalid function_call response item");
-            }
-            state.response.tool_calls.push_back({std::move(*call_id), std::move(*name), std::move(*arguments)});
-        } else if (*item_type == "message") {
-            auto message = microcodex::responseMessage(item_json);
-            if (!message) {
-                return std::unexpected(message.error());
-            }
-            if (*message) {
-                state.fallback_text += (*message)->text;
-            }
-        }
-        return {};
-    }
-
-    if (*type == "response.completed") {
-        auto response = findJsonMember(data, "response");
-        if (!response) {
-            return std::unexpected(response.error());
-        }
-        if (!*response) {
-            return std::unexpected("response.completed has no response");
-        }
-
-        // Some compatible endpoints omit output_text.delta and provide
-        // only the final message item. Emit that fallback exactly once.
-        if (state.response.text.empty() && !state.fallback_text.empty()) {
-            state.response.text = state.fallback_text;
-            emitTextDelta(state, state.fallback_text);
-        }
-        auto usage = findJsonMember(**response, "usage");
-        if (usage && *usage) {
-            auto input_tokens = findJsonMember(**usage, "input_tokens");
-            if (input_tokens && *input_tokens) {
-                state.response.input_tokens = unsignedJsonValue(**input_tokens).value_or(0);
-            }
-        }
-        state.completed = true;
-        return {};
-    }
-
-    if (*type == "response.failed") {
-        auto response = findJsonMember(data, "response");
-        if (response && *response) {
-            auto error = findJsonMember(**response, "error");
-            if (error && *error) {
-                auto message = jsonStringMember(**error, "message");
-                if (message && *message) {
-                    return std::unexpected(**message);
-                }
-            }
-        }
-        return std::unexpected("The Codex response failed");
-    }
-
-    if (*type == "response.incomplete") {
-        std::string reason = "unknown reason";
-        auto response = findJsonMember(data, "response");
-        if (response && *response) {
-            auto details = findJsonMember(**response, "incomplete_details");
-            if (details && *details) {
-                auto value = jsonStringMember(**details, "reason");
-                if (value && *value) {
-                    reason = std::move(**value);
-                }
-            }
-        }
-        return std::unexpected(std::string(incomplete_response_prefix) + reason);
-    }
-
-    if (*type == "error") {
-        auto error = findJsonMember(data, "error");
-        if (error && *error) {
-            auto message = jsonStringMember(**error, "message");
-            if (message && *message) {
-                return std::unexpected(**message);
-            }
-        }
-        auto message = jsonStringMember(data, "message");
-        if (message && *message) {
-            return std::unexpected(**message);
-        }
-        return std::unexpected("The Codex API returned an error event");
-    }
+    if (*type == "response.output_text.delta") return handleOutputTextDelta(data, state);
+    if (*type == "response.output_item.done") return handleOutputItemDone(data, state);
+    if (*type == "response.completed") return handleResponseCompleted(data, state);
+    if (*type == "response.failed") return std::unexpected(responseFailedMessage(data));
+    if (*type == "response.incomplete") return std::unexpected(responseIncompleteMessage(data));
+    if (*type == "error") return std::unexpected(errorEventMessage(data));
 
     // Creation, progress, and metadata events do not affect this minimal
     // turn runner. Final response items above are the durable state.
@@ -392,18 +417,14 @@ std::expected<void, std::string> receiveResponseHeader(const std::string_view li
 }
 
 std::string responseErrorMessage(const std::string_view body, const long status) {
-    auto error = findJsonMember(body, "error");
-    if (error && *error) {
-        auto message = jsonStringMember(**error, "message");
-        if (message && *message) {
-            return "Codex API returned HTTP " + std::to_string(status) + ": " + **message;
-        }
+    std::string prefix = "Codex API returned HTTP " + std::to_string(status);
+    if (const std::optional<std::string> message = nestedStringMember(body, {.outer = "error", .key = "message"})) {
+        return prefix + ": " + *message;
     }
-    auto detail = jsonStringMember(body, "detail");
-    if (detail && *detail) {
-        return "Codex API returned HTTP " + std::to_string(status) + ": " + **detail;
+    if (const std::optional<std::string> detail = optionalStringMember(body, "detail")) {
+        return prefix + ": " + *detail;
     }
-    return "Codex API returned HTTP " + std::to_string(status);
+    return prefix;
 }
 
 // sendUserMessage() installs one stop source for the lifetime of a turn.
@@ -416,6 +437,8 @@ public:
 
     RunningTurnGuard(const RunningTurnGuard&) = delete;
     RunningTurnGuard& operator=(const RunningTurnGuard&) = delete;
+    RunningTurnGuard(RunningTurnGuard&&) = delete;
+    RunningTurnGuard& operator=(RunningTurnGuard&&) = delete;
 
     ~RunningTurnGuard() {
         const std::lock_guard lock(mutex_);
@@ -428,6 +451,190 @@ private:
     bool& running_;
     std::optional<std::stop_source>& stop_source_;
 };
+
+// Rejects request settings that would produce an invalid request.
+std::expected<void, std::string> validateRequestConfig(const microcodex::CodexApiConfig& config) {
+    if (config.access_token.empty()) {
+        return std::unexpected("Codex access token cannot be empty");
+    }
+    if (config.model.empty()) {
+        return std::unexpected("Codex model cannot be empty");
+    }
+    if (config.endpoint.empty()) {
+        return std::unexpected("Codex endpoint cannot be empty");
+    }
+    if (config.reasoning_effort.empty()) {
+        return std::unexpected("Reasoning effort cannot be empty");
+    }
+    if (config.idle_timeout_seconds <= 0) {
+        return std::unexpected("Idle timeout must be greater than zero");
+    }
+    if (config.maximum_tool_rounds == 0) {
+        return std::unexpected("Maximum tool rounds must be greater than zero");
+    }
+    if (config.maximum_parallel_tool_calls == 0) {
+        return std::unexpected("Maximum parallel tool calls must be greater than zero");
+    }
+    if (containsNewline(config.access_token) || containsNewline(config.account_id)) {
+        return std::unexpected("Credentials cannot contain a newline");
+    }
+    return {};
+}
+
+std::expected<void, std::string> validateRequestTools(
+    const std::span<const std::shared_ptr<const microcodex::ToolBase>> tools) {
+    std::unordered_set<std::string> tool_names;
+    for (const auto& tool : tools) {
+        if (tool == nullptr) {
+            return std::unexpected("Tools cannot contain null entries");
+        }
+        if (tool->name().empty()) {
+            return std::unexpected("Tool names cannot be empty");
+        }
+        if (!tool_names.emplace(tool->name()).second) {
+            return std::unexpected("Duplicate tool name '" + std::string(tool->name()) + "'");
+        }
+    }
+    return {};
+}
+
+// Appends the input items, then final_item when present, as JSON array elements.
+void appendInputItems(std::string& body, const std::span<const std::string> items, const std::string_view final_item) {
+    bool first = true;
+    for (const std::string& item : items) {
+        if (!first) {
+            body += ',';
+        }
+        body += item;
+        first = false;
+    }
+    if (!final_item.empty()) {
+        if (!items.empty()) body += ',';
+        body += final_item;
+    }
+}
+
+void appendToolDefinitions(std::string& body,
+                           const std::span<const std::shared_ptr<const microcodex::ToolBase>> tools) {
+    bool first = true;
+    for (const auto& tool : tools) {
+        if (!first) {
+            body += ',';
+        }
+        body += tool->toJsonString();
+        first = false;
+    }
+}
+
+// Pairs each function call that will not run with an explicit
+// non-execution result, so the saved turn remains valid input for a later
+// continuation.
+void appendUnexecutedToolOutputs(std::vector<std::string>& items,
+                                 const std::span<const microcodex::CodexToolCall> calls) {
+    for (const microcodex::CodexToolCall& call : calls) {
+        items.push_back(microcodex::toolOutputItem({
+            .call_id = call.call_id,
+            .output = "Error: Tool call was not executed because Codex exceeded the maximum number of tool rounds",
+        }));
+    }
+}
+
+std::expected<void, std::string> validateToolCalls(const std::span<const microcodex::CodexToolCall> calls,
+                                                   const std::size_t maximum_parallel_calls) {
+    if (calls.empty()) {
+        return std::unexpected("At least one tool call is required");
+    }
+    if (calls.size() > maximum_parallel_calls) {
+        return std::unexpected("Codex requested more than the configured maximum number of parallel tool calls");
+    }
+
+    std::unordered_set<std::string> call_ids;
+    for (const microcodex::CodexToolCall& call : calls) {
+        if (call.call_id.empty()) {
+            return std::unexpected("Tool call ID cannot be empty");
+        }
+        if (call.name.empty()) {
+            return std::unexpected("Tool name cannot be empty");
+        }
+        if (!call_ids.emplace(call.call_id).second) {
+            return std::unexpected("Duplicate tool call ID '" + call.call_id + "'");
+        }
+    }
+    return {};
+}
+
+// One launched tool call. Result is CodexApi's private result type; the
+// helpers below deduce it instead of naming it.
+template <typename Result>
+struct ToolTask {
+    std::future<Result> future;
+    std::stop_source stop_source;
+    // Anchors the task's timeout deadline: with several stuck tools,
+    // waiting a fresh `timeout` per task would let the turn take up to
+    // N x timeout, so each task waits only until its own deadline.
+    std::chrono::steady_clock::time_point start_time;
+    // Set when the task is stopped for timing out. Overdue tasks are
+    // stopped together and share one grace period, so a batch of stuck
+    // tools cannot stack their grace periods either.
+    std::chrono::steady_clock::time_point grace_deadline;
+};
+
+// How long a stopped tool gets to observe the stop and exit.
+constexpr std::chrono::seconds tool_stop_grace_period(2);
+
+// The deadline is anchored at the task's launch, not at the moment the
+// caller reaches it: otherwise parallel stuck tools would each consume a
+// full timeout and the turn could take N x timeout. A task already stopped
+// for timing out counts as timed out even if it exited cooperatively, so it
+// is not reported as interrupted.
+template <typename Result>
+bool toolTaskTimedOut(ToolTask<Result>& task, const std::chrono::seconds timeout) {
+    return timeout.count() > 0 && (task.grace_deadline != std::chrono::steady_clock::time_point{} ||
+                                   task.future.wait_until(task.start_time + timeout) == std::future_status::timeout);
+}
+
+// Asks every overdue, unfinished tool in tasks to stop at once, so they all
+// share one grace period.
+template <typename Result>
+void stopOverdueToolTasks(const std::span<ToolTask<Result>> tasks, const std::chrono::seconds timeout) {
+    const auto now = std::chrono::steady_clock::now();
+    for (ToolTask<Result>& task : tasks) {
+        if (task.start_time + timeout <= now &&
+            task.future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+            task.stop_source.request_stop();
+            task.grace_deadline = now + tool_stop_grace_period;
+        }
+    }
+}
+
+// Gives a cooperative tool its grace period to observe the stop and exit
+// (the bash tool kills its child process on stop). A tool that ignores the
+// stop is left to a detached reaper thread: futures from std::async block
+// in their destructor until the task finishes, so a still-running task must
+// never be destroyed here. Its result is discarded either way.
+template <typename Result>
+void releaseTimedOutToolTask(ToolTask<Result>& task) {
+    if (task.future.wait_until(task.grace_deadline) != std::future_status::ready) {
+        std::thread([future = std::move(task.future)] { future.wait(); }).detach();
+    }
+}
+
+// Reads a task that finished within its timeout, turning a task failure
+// into an error result for that call.
+template <typename Result>
+Result finishedToolTaskResult(std::future<Result>& future, const microcodex::CodexToolCall& call) {
+    try {
+        return future.get();
+    } catch (const std::exception& error) {
+        return Result{
+            .output = {.call_id = call.call_id, .output = std::string("Error: Tool task failed: ") + error.what()},
+            .edit = {},
+            .succeeded = false};
+    } catch (...) {
+        return Result{
+            .output = {.call_id = call.call_id, .output = "Error: Tool task failed"}, .edit = {}, .succeeded = false};
+    }
+}
 
 }  // namespace
 
@@ -706,47 +913,14 @@ std::expected<std::string, std::string> CodexApi::buildRequestBody(const std::sp
                                                                    const std::string_view instructions,
                                                                    const bool include_tools,
                                                                    const std::string_view final_item) const {
-    if (config_.access_token.empty()) {
-        return std::unexpected("Codex access token cannot be empty");
-    }
-    if (config_.model.empty()) {
-        return std::unexpected("Codex model cannot be empty");
-    }
-    if (config_.endpoint.empty()) {
-        return std::unexpected("Codex endpoint cannot be empty");
-    }
-    if (config_.reasoning_effort.empty()) {
-        return std::unexpected("Reasoning effort cannot be empty");
-    }
-    if (config_.idle_timeout_seconds <= 0) {
-        return std::unexpected("Idle timeout must be greater than zero");
-    }
-    if (config_.maximum_tool_rounds == 0) {
-        return std::unexpected("Maximum tool rounds must be greater than zero");
-    }
-    if (config_.maximum_parallel_tool_calls == 0) {
-        return std::unexpected("Maximum parallel tool calls must be greater than zero");
-    }
-    if (containsNewline(config_.access_token) || containsNewline(config_.account_id)) {
-        return std::unexpected("Credentials cannot contain a newline");
-    }
+    auto valid_config = validateRequestConfig(config_);
+    if (!valid_config) return std::unexpected(valid_config.error());
     if (items.empty() && final_item.empty()) {
         return std::unexpected("Conversation has no input");
     }
-
-    std::unordered_set<std::string> tool_names;
     if (include_tools) {
-        for (const auto& tool : config_.tools) {
-            if (tool == nullptr) {
-                return std::unexpected("Tools cannot contain null entries");
-            }
-            if (tool->name().empty()) {
-                return std::unexpected("Tool names cannot be empty");
-            }
-            if (!tool_names.emplace(tool->name()).second) {
-                return std::unexpected("Duplicate tool name '" + std::string(tool->name()) + "'");
-            }
-        }
+        auto valid_tools = validateRequestTools(config_.tools);
+        if (!valid_tools) return std::unexpected(valid_tools.error());
     }
 
     const std::string window_id = session_id_ + ":" + std::to_string(compaction_generation_);
@@ -755,24 +929,10 @@ std::expected<std::string, std::string> CodexApi::buildRequestBody(const std::sp
     body += ",\"instructions\":";
     appendJsonString(body, instructions);
     body += ",\"input\":[";
-    for (std::size_t index = 0; index < items.size(); ++index) {
-        if (index != 0) {
-            body += ',';
-        }
-        body += items[index];
-    }
-    if (!final_item.empty()) {
-        if (!items.empty()) body += ',';
-        body += final_item;
-    }
+    appendInputItems(body, items, final_item);
     body += R"(],"tools":[)";
     if (include_tools) {
-        for (std::size_t index = 0; index < config_.tools.size(); ++index) {
-            if (index != 0) {
-                body += ',';
-            }
-            body += config_.tools[index]->toJsonString();
-        }
+        appendToolDefinitions(body, config_.tools);
     }
     body += ']';
 
@@ -839,39 +999,10 @@ CodexApi::ToolExecutionResult CodexApi::executeToolCall(const std::span<const st
 std::expected<std::vector<CodexApi::ToolExecutionResult>, std::string> CodexApi::executeToolCalls(
     const std::span<const CodexToolCall> calls, const std::stop_token stop_token,
     const std::string_view turn_id) const {
-    if (calls.empty()) {
-        return std::unexpected("At least one tool call is required");
-    }
-    if (calls.size() > config_.maximum_parallel_tool_calls) {
-        return std::unexpected("Codex requested more than the configured maximum number of parallel tool calls");
-    }
+    auto valid_calls = validateToolCalls(calls, config_.maximum_parallel_tool_calls);
+    if (!valid_calls) return std::unexpected(valid_calls.error());
 
-    std::unordered_set<std::string> call_ids;
-    for (const CodexToolCall& call : calls) {
-        if (call.call_id.empty()) {
-            return std::unexpected("Tool call ID cannot be empty");
-        }
-        if (call.name.empty()) {
-            return std::unexpected("Tool name cannot be empty");
-        }
-        if (!call_ids.emplace(call.call_id).second) {
-            return std::unexpected("Duplicate tool call ID '" + call.call_id + "'");
-        }
-    }
-
-    struct ToolTask {
-        std::future<ToolExecutionResult> future;
-        std::stop_source stop_source;
-        // Anchors the task's timeout deadline: with several stuck tools,
-        // waiting a fresh `timeout` per task would let the turn take up to
-        // N x timeout, so each task waits only until its own deadline.
-        std::chrono::steady_clock::time_point start_time;
-        // Set when the task is stopped for timing out. Overdue tasks are
-        // stopped together and share one grace period, so a batch of stuck
-        // tools cannot stack their grace periods either.
-        std::chrono::steady_clock::time_point grace_deadline;
-    };
-    std::vector<ToolTask> tasks;
+    std::vector<ToolTask<ToolExecutionResult>> tasks;
     tasks.reserve(calls.size());
     try {
         // Captured by value: a task that hits the execution timeout keeps
@@ -888,7 +1019,7 @@ std::expected<std::vector<CodexApi::ToolExecutionResult>, std::string> CodexApi:
                 .text = call.arguments,
                 .edit = {},
             });
-            ToolTask task;
+            ToolTask<ToolExecutionResult> task;
             const std::stop_token task_token = task.stop_source.get_token();
             task.start_time = std::chrono::steady_clock::now();
             task.future = std::async(std::launch::async, [tools, call, task_token, maximum_output_bytes] {
@@ -915,69 +1046,26 @@ std::expected<std::vector<CodexApi::ToolExecutionResult>, std::string> CodexApi:
     std::vector<ToolExecutionResult> results;
     results.reserve(calls.size());
     for (std::size_t index = 0; index < tasks.size(); ++index) {
+        ToolTask<ToolExecutionResult>& task = tasks[index];
         ToolExecutionResult result;
-        // The deadline is anchored at the task's launch, not at the moment
-        // this loop reaches it: otherwise parallel stuck tools would each
-        // consume a full timeout and the turn could take N x timeout.
-        // A task already stopped for timing out counts as timed out even if
-        // it exited cooperatively, so it is not reported as interrupted.
-        const bool timed_out =
-            timeout.count() > 0 &&
-            (tasks[index].grace_deadline != std::chrono::steady_clock::time_point{} ||
-             tasks[index].future.wait_until(tasks[index].start_time + timeout) == std::future_status::timeout);
-        if (timed_out) {
+        if (toolTaskTimedOut(task, timeout)) {
             // Ask every overdue tool to stop at once, then report the
             // timeout without waiting for it: the turn must never wedge
             // behind a hung tool call.
-            if (tasks[index].grace_deadline == std::chrono::steady_clock::time_point{}) {
-                const auto now = std::chrono::steady_clock::now();
-                for (std::size_t later = index; later < tasks.size(); ++later) {
-                    ToolTask& task = tasks[later];
-                    if (task.start_time + timeout <= now &&
-                        task.future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
-                        task.stop_source.request_stop();
-                        task.grace_deadline = now + std::chrono::seconds(2);
-                    }
-                }
+            if (task.grace_deadline == std::chrono::steady_clock::time_point{}) {
+                stopOverdueToolTasks(std::span(tasks).subspan(index), timeout);
             }
             result = {.output = {.call_id = calls[index].call_id,
                                  .output = "Error: Tool execution timed out after " +
                                            std::to_string(config_.tool_execution_timeout_seconds) + " seconds"},
                       .edit = {},
                       .succeeded = false};
-            // Give a cooperative tool a brief grace period to observe the
-            // stop and exit (the bash tool kills its child process on
-            // stop). A tool that ignores the stop is left to a detached
-            // reaper thread: futures from std::async block in their
-            // destructor until the task finishes, so a still-running task
-            // must never be destroyed here.
-            if (tasks[index].future.wait_until(tasks[index].grace_deadline) == std::future_status::ready) {
-                try {
-                    static_cast<void>(tasks[index].future.get());
-                } catch (...) {}
-            } else {
-                std::thread([future = std::move(tasks[index].future)]() mutable {
-                    try {
-                        static_cast<void>(future.get());
-                    } catch (...) {}
-                }).detach();
-            }
+            releaseTimedOutToolTask(task);
         } else {
-            try {
-                // All futures have already been launched. Reading them in this
-                // order preserves the model's call order without serializing
-                // their actual execution.
-                result = tasks[index].future.get();
-            } catch (const std::exception& error) {
-                result = {.output = {.call_id = calls[index].call_id,
-                                     .output = std::string("Error: Tool task failed: ") + error.what()},
-                          .edit = {},
-                          .succeeded = false};
-            } catch (...) {
-                result = {.output = {.call_id = calls[index].call_id, .output = "Error: Tool task failed"},
-                          .edit = {},
-                          .succeeded = false};
-            }
+            // All futures have already been launched. Reading them in this
+            // order preserves the model's call order without serializing
+            // their actual execution.
+            result = finishedToolTaskResult(task.future, calls[index]);
         }
 
         emitEvent({
@@ -1027,16 +1115,8 @@ std::expected<CodexApiResponse, std::string> CodexApi::requestWithToolExecution(
 
         ++tool_rounds;
         if (tool_rounds > config_.maximum_tool_rounds) {
-            // request() has already retained these function-call items. Pair
-            // each one with an explicit non-execution result so the saved
-            // turn remains valid input for a later continuation.
-            for (const CodexToolCall& call : response->tool_calls) {
-                input_items_.push_back(toolOutputItem({
-                    .call_id = call.call_id,
-                    .output =
-                        "Error: Tool call was not executed because Codex exceeded the maximum number of tool rounds",
-                }));
-            }
+            // request() has already retained these function-call items.
+            appendUnexecutedToolOutputs(input_items_, response->tool_calls);
             return std::unexpected(std::string(tool_round_limit_error));
         }
 
@@ -1067,7 +1147,7 @@ std::expected<CodexApiResponse, std::string> CodexApi::request(const std::stop_t
     }
 
     ModelResponse partial;
-    auto sampled = performRequest(std::move(*request_body), stop_token, turn_id, true, &partial);
+    auto sampled = performRequest(*request_body, stop_token, turn_id, true, &partial);
     if (!sampled) {
         if (stop_token.stop_requested() || isTurnUsageLimitError(sampled.error()) ||
             isRemoteFailureError(sampled.error())) {
@@ -1126,7 +1206,7 @@ std::expected<CodexApi::ModelResponse, std::string> CodexApi::performRequest(con
             .body = request_body,
             .idle_timeout_seconds = config_.idle_timeout_seconds,
             .total_timeout_seconds = 0,
-            .maximum_response_bytes = 64 * 1024,
+            .maximum_response_bytes = std::size_t{64} * 1024,
             .stop_token = stop_token,
         },
         receiveResponseBody, receiveResponseHeader, &state);
@@ -1181,10 +1261,10 @@ std::expected<CodexApi::ModelResponse, std::string> CodexApi::performRequest(con
 std::expected<std::string, std::string> CodexApi::requestSummary(const std::span<const std::string> items,
                                                                  const std::stop_token stop_token) {
     const std::string prompt = userMessageItem("Produce the conversation summary now.");
-    auto body = buildRequestBody(items, compactor_.summaryInstructions(), false, prompt);
+    auto body = buildRequestBody(items, ContextCompactor::summaryInstructions(), false, prompt);
     if (!body) return std::unexpected(body.error());
 
-    auto sampled = performRequest(std::move(*body), stop_token, makeUuid(), false);
+    auto sampled = performRequest(*body, stop_token, makeUuid(), false);
     if (!sampled) return std::unexpected(sampled.error());
     if (sampled->response.text.empty()) {
         return std::unexpected("Compaction returned no summary text");

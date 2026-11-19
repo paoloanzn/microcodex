@@ -4,6 +4,7 @@
 #include "ui.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -48,8 +49,8 @@ using microcodex::ui::textWidth;
 using microcodex::ui::wrapStyledSpans;
 using microcodex::ui::wrapStyledText;
 
-constexpr std::size_t maximum_transcript_bytes = 512 * 1024;
-constexpr std::size_t maximum_tool_preview_bytes = 16 * 1024;
+constexpr std::size_t maximum_transcript_bytes = std::size_t{512} * 1024;
+constexpr std::size_t maximum_tool_preview_bytes = std::size_t{16} * 1024;
 constexpr std::size_t large_paste_character_threshold = 1000;
 constexpr std::size_t maximum_collapsed_tool_output_rows = 5;
 constexpr int animation_frame_milliseconds = 32;
@@ -67,7 +68,7 @@ constexpr uintattr_t error_foreground = 9;
 constexpr uintattr_t added_background = 22;
 constexpr uintattr_t removed_background = 52;
 
-enum class EntryKind {
+enum class EntryKind : std::uint8_t {
     User,
     Assistant,
     Tool,
@@ -174,6 +175,11 @@ private:
 };
 
 struct TerminalGuard {
+    TerminalGuard() = default;
+    TerminalGuard(const TerminalGuard&) = delete;
+    TerminalGuard& operator=(const TerminalGuard&) = delete;
+    TerminalGuard(TerminalGuard&&) = delete;
+    TerminalGuard& operator=(TerminalGuard&&) = delete;
     ~TerminalGuard() {
         microcodex::terminal::disableBracketedPaste();
         tb_shutdown();
@@ -245,7 +251,57 @@ UiEntry* findToolEntry(UiState& state, const std::string_view call_id) {
     }
     return nullptr;
 }
-// Maybe this does too much? Could be split into different routines
+// Adds one saved response item to the transcript: a message, a tool call, or
+// the output of an earlier tool call. Other item types are skipped.
+std::expected<void, std::string> addSavedItem(UiState& state, const microcodex::SavedTurn& turn,
+                                              const std::string& item) {
+    auto message = microcodex::responseMessage(item);
+    if (!message) return std::unexpected(message.error());
+    if (auto& value = *message; value) {
+        const bool user = value->role == "user";
+        addEntry(state, {
+                            .kind = user ? EntryKind::User : EntryKind::Assistant,
+                            .turn_id = turn.id,
+                            .call_id = {},
+                            .title = user ? "you" : "codex",
+                            .text = std::move(value->text),
+                            .output = {},
+                            .markdown_cache = {},
+                            .edit = {},
+                        });
+        return {};
+    }
+
+    auto call = microcodex::responseToolCall(item);
+    if (!call) return std::unexpected(call.error());
+    if (auto& value = *call; value) {
+        addEntry(state, {
+                            .kind = EntryKind::Tool,
+                            .turn_id = turn.id,
+                            .call_id = std::move(value->call_id),
+                            .title = std::move(value->name),
+                            .text = std::move(value->arguments),
+                            .output = {},
+                            .markdown_cache = {},
+                            .finished = false,
+                            .edit = {},
+                        });
+        return {};
+    }
+
+    auto output = microcodex::responseToolOutput(item);
+    if (!output) return std::unexpected(output.error());
+    if (auto& value = *output; value) {
+        UiEntry* entry = findToolEntry(state, value->call_id);
+        if (entry != nullptr) {
+            replaceEntryOutput(state, *entry, std::move(value->output));
+            entry->finished = true;
+            entry->succeeded = !entry->output.starts_with("Error:");
+        }
+    }
+    return {};
+}
+
 std::expected<void, std::string> loadSavedHistory(UiState& state, microcodex::CodexApi& api) {
     auto initialized = api.initializeConversation();
     if (!initialized) return std::unexpected(initialized.error());
@@ -254,50 +310,8 @@ std::expected<void, std::string> loadSavedHistory(UiState& state, microcodex::Co
     if (!turns) return std::unexpected(turns.error());
     for (const microcodex::SavedTurn& turn : *turns) {
         for (const std::string& item : turn.items) {
-            auto message = microcodex::responseMessage(item);
-            if (!message) return std::unexpected(message.error());
-            if (*message) {
-                const bool user = (*message)->role == "user";
-                addEntry(state, {
-                                    .kind = user ? EntryKind::User : EntryKind::Assistant,
-                                    .turn_id = turn.id,
-                                    .call_id = {},
-                                    .title = user ? "you" : "codex",
-                                    .text = std::move((*message)->text),
-                                    .output = {},
-                                    .markdown_cache = {},
-                                    .edit = {},
-                                });
-                continue;
-            }
-
-            auto call = microcodex::responseToolCall(item);
-            if (!call) return std::unexpected(call.error());
-            if (*call) {
-                addEntry(state, {
-                                    .kind = EntryKind::Tool,
-                                    .turn_id = turn.id,
-                                    .call_id = std::move((*call)->call_id),
-                                    .title = std::move((*call)->name),
-                                    .text = std::move((*call)->arguments),
-                                    .output = {},
-                                    .markdown_cache = {},
-                                    .finished = false,
-                                    .edit = {},
-                                });
-                continue;
-            }
-
-            auto output = microcodex::responseToolOutput(item);
-            if (!output) return std::unexpected(output.error());
-            if (*output) {
-                UiEntry* entry = findToolEntry(state, (*output)->call_id);
-                if (entry != nullptr) {
-                    replaceEntryOutput(state, *entry, std::move((*output)->output));
-                    entry->finished = true;
-                    entry->succeeded = !entry->output.starts_with("Error:");
-                }
-            }
+            auto added = addSavedItem(state, turn, item);
+            if (!added) return added;
         }
     }
     state.scroll = 0;
@@ -551,25 +565,31 @@ std::size_t offsetAtVisualColumn(const std::string_view text, const std::size_t 
     return offset;
 }
 
-std::size_t moveCursorVertically(const std::string_view text, const std::size_t cursor, const int direction) {
+enum class VerticalDirection : std::uint8_t {
+    Up,
+    Down,
+};
+
+std::size_t moveCursorVertically(const std::string_view text, const std::size_t cursor,
+                                 const VerticalDirection direction) {
     const std::size_t current_start = lineStart(text, cursor);
     const std::size_t current_end = lineEnd(text, cursor);
     const int column = visualColumn(text, current_start, cursor);
 
-    if (direction < 0) {
+    if (direction == VerticalDirection::Up) {
         if (current_start == 0) {
             return cursor;
         }
-        const std::size_t target_end = current_start - 1;
-        const std::size_t target_start = lineStart(text, target_end);
-        return offsetAtVisualColumn(text, target_start, target_end, column);
+        const std::size_t previous_end = current_start - 1;
+        const std::size_t previous_start = lineStart(text, previous_end);
+        return offsetAtVisualColumn(text, previous_start, previous_end, column);
     }
     if (current_end == text.size()) {
         return cursor;
     }
-    const std::size_t target_start = current_end + 1;
-    const std::size_t target_end = lineEnd(text, target_start);
-    return offsetAtVisualColumn(text, target_start, target_end, column);
+    const std::size_t next_start = current_end + 1;
+    const std::size_t next_end = lineEnd(text, next_start);
+    return offsetAtVisualColumn(text, next_start, next_end, column);
 }
 
 void keepCursorOutsidePaste(UiState& state) {
@@ -585,8 +605,8 @@ void keepCursorOutsidePaste(UiState& state) {
 void eraseInputRange(UiState& state, std::size_t first, std::size_t last) {
     if (first == last) return;
     // A placeholder is one editable unit, including for word and line erases.
-    bool expanded;
-    do {
+    bool expanded = true;
+    while (expanded) {
         expanded = false;
         for (const auto& [placeholder, paste] : state.pending_pastes) {
             const auto position = state.input.find(placeholder);
@@ -597,7 +617,7 @@ void eraseInputRange(UiState& state, std::size_t first, std::size_t last) {
                 expanded = true;
             }
         }
-    } while (expanded);
+    }
     std::erase_if(state.pending_pastes, [&](const auto& entry) {
         const auto position = state.input.find(entry.first);
         return position != std::string::npos && first < position + entry.first.size() && last > position;
@@ -608,13 +628,13 @@ void eraseInputRange(UiState& state, std::size_t first, std::size_t last) {
 }
 
 void insertCodepoint(UiState& state, const std::uint32_t codepoint) {
-    char utf8[7]{};
-    const int length = tb_utf8_unicode_to_char(utf8, codepoint);
+    std::array<char, 7> utf8{};
+    const int length = tb_utf8_unicode_to_char(utf8.data(), codepoint);
     if (length <= 0) {
         return;
     }
     keepCursorOutsidePaste(state);
-    state.input.insert(state.input_cursor, utf8, static_cast<std::size_t>(length));
+    state.input.insert(state.input_cursor, utf8.data(), static_cast<std::size_t>(length));
     state.input_cursor += static_cast<std::size_t>(length);
     state.dirty = true;
 }
@@ -674,59 +694,80 @@ void insertPaste(UiState& state) {
     state.dirty = true;
 }
 
-WrappedText wrapText(const std::string_view text, const int width, const std::string_view first_prefix,
-                     const std::string_view continuation_prefix, const std::size_t cursor = std::string_view::npos) {
-    WrappedText result;
-    std::string line(first_prefix);
-    int column = textWidth(first_prefix);
-    int content_start = column;
-    bool cursor_recorded = false;
+// Tab stops are every four columns.
+constexpr int tab_width = 4;
 
-    const auto recordCursor = [&] {
-        if (!cursor_recorded) {
-            result.cursor_line = result.lines.size();
-            result.cursor_column = std::min(column, std::max(0, width - 1));
-            cursor_recorded = true;
+// Wraps composer text into terminal rows and records the row and column of
+// the cursor. Each row starts from a prefix, and wrapping happens only once a
+// row holds content beyond that prefix.
+class TextWrapper {
+public:
+    TextWrapper(const std::string_view first_prefix, const int width, const std::string_view continuation_prefix)
+        : width_(width),
+          continuation_prefix_(continuation_prefix),
+          line_(first_prefix),
+          column_(textWidth(first_prefix)),
+          content_start_(column_) {}
+
+    WrappedText wrap(const std::string_view text, const std::size_t cursor) && {
+        for (std::size_t offset = 0; offset < text.size();) {
+            if (cursor == offset) {
+                recordCursor();
+            }
+
+            auto [codepoint, length] = decodeCodepoint(text, offset);
+            if (length == 0) {
+                break;
+            }
+            appendCodepoint(codepoint, cursor == offset);
+            offset += length;
         }
-    };
 
-    const auto startContinuation = [&] {
-        result.lines.push_back(std::move(line));
-        line.assign(continuation_prefix);
-        column = textWidth(continuation_prefix);
-        content_start = column;
-    };
-
-    for (std::size_t offset = 0; offset < text.size();) {
-        if (cursor == offset) {
+        if (cursor == text.size()) {
             recordCursor();
         }
+        result_.lines.push_back(std::move(line_));
+        return std::move(result_);
+    }
 
-        auto [codepoint, length] = decodeCodepoint(text, offset);
-        if (length == 0) {
-            break;
+private:
+    void recordCursor() {
+        if (!cursor_recorded_) {
+            result_.cursor_line = result_.lines.size();
+            result_.cursor_column = std::min(column_, std::max(0, width_ - 1));
+            cursor_recorded_ = true;
         }
+    }
 
+    void startContinuation() {
+        result_.lines.push_back(std::move(line_));
+        line_.assign(continuation_prefix_);
+        column_ = textWidth(continuation_prefix_);
+        content_start_ = column_;
+    }
+
+    void appendTab() {
+        const int spaces = tab_width - (column_ % tab_width);
+        for (int index = 0; index < spaces; ++index) {
+            if (column_ >= width_ && column_ > content_start_) {
+                startContinuation();
+            }
+            line_ += ' ';
+            ++column_;
+        }
+    }
+
+    void appendCodepoint(std::uint32_t codepoint, const bool cursor_before) {
         if (codepoint == '\r') {
-            offset += length;
-            continue;
+            return;
         }
         if (codepoint == '\n') {
             startContinuation();
-            offset += length;
-            continue;
+            return;
         }
         if (codepoint == '\t') {
-            const int spaces = 4 - (column % 4);
-            for (int index = 0; index < spaces; ++index) {
-                if (column >= width && column > content_start) {
-                    startContinuation();
-                }
-                line += ' ';
-                ++column;
-            }
-            offset += length;
-            continue;
+            appendTab();
+            return;
         }
 
         int codepoint_width = tb_wcwidth(codepoint);
@@ -734,30 +775,36 @@ WrappedText wrapText(const std::string_view text, const int width, const std::st
             codepoint = 0xfffd;
             codepoint_width = 1;
         }
-        if (codepoint_width > 0 && column + codepoint_width > width && column > content_start) {
+        if (codepoint_width > 0 && column_ + codepoint_width > width_ && column_ > content_start_) {
             startContinuation();
-            if (cursor == offset) {
+            if (cursor_before) {
                 // A cursor before the character belongs on the wrapped
                 // line, not beyond the right edge of the previous one.
-                cursor_recorded = false;
+                cursor_recorded_ = false;
                 recordCursor();
             }
         }
 
-        char utf8[7]{};
-        const int encoded = tb_utf8_unicode_to_char(utf8, codepoint);
+        std::array<char, 7> utf8{};
+        const int encoded = tb_utf8_unicode_to_char(utf8.data(), codepoint);
         if (encoded > 0) {
-            line.append(utf8, static_cast<std::size_t>(encoded));
+            line_.append(utf8.data(), static_cast<std::size_t>(encoded));
         }
-        column += std::max(0, codepoint_width);
-        offset += length;
+        column_ += std::max(0, codepoint_width);
     }
 
-    if (cursor == text.size()) {
-        recordCursor();
-    }
-    result.lines.push_back(std::move(line));
-    return result;
+    int width_;
+    std::string_view continuation_prefix_;
+    WrappedText result_;
+    std::string line_;
+    int column_ = 0;
+    int content_start_ = 0;
+    bool cursor_recorded_ = false;
+};
+
+WrappedText wrapText(const std::string_view text, const int width, const std::string_view first_prefix,
+                     const std::string_view continuation_prefix, const std::size_t cursor = std::string_view::npos) {
+    return TextWrapper(first_prefix, width, continuation_prefix).wrap(text, cursor);
 }
 
 void appendLines(std::vector<StyledLine>& destination, std::vector<StyledLine> source) {
@@ -811,31 +858,43 @@ std::optional<std::string> bashCommand(const UiEntry& entry) {
     return std::move(*command);
 }
 
-std::string paddedLineNumber(const std::size_t number, const std::size_t width) {
-    std::string text = std::to_string(number);
-    text.insert(0, width - text.size(), ' ');
-    return text;
+// One line of an edit diff: ' ' for context, '-' for removed, '+' for added.
+struct DiffLine {
+    std::string_view text;
+    std::size_t number;
+    char marker;
+};
+
+struct DiffColors {
+    uintattr_t foreground = TB_DEFAULT;
+    uintattr_t background = TB_DEFAULT;
+};
+
+DiffColors diffColors(const char marker) {
+    if (marker == '+') return {.foreground = success_foreground, .background = added_background};
+    if (marker == '-') return {.foreground = error_foreground, .background = removed_background};
+    return {};
 }
 
-void appendDiffLine(std::vector<StyledLine>& lines, const std::string_view text, const std::size_t number,
-                    const std::size_t number_width, const char marker, const int width) {
-    const bool added = marker == '+';
-    const bool removed = marker == '-';
-    const uintattr_t foreground = added ? success_foreground : removed ? error_foreground : TB_DEFAULT;
-    const uintattr_t background = added ? added_background : removed ? removed_background : TB_DEFAULT;
+void appendDiffLine(std::vector<StyledLine>& lines, const std::size_t number_width, const DiffLine& line,
+                    const int width) {
+    const bool changed = line.marker == '+' || line.marker == '-';
+    const DiffColors colors = diffColors(line.marker);
+    std::string number = std::to_string(line.number);
+    number.insert(0, number_width - number.size(), ' ');
     const StyledLine first = lineWithPrefix(
         {
             {.text = "    ", .foreground = TB_DEFAULT},
-            {.text = paddedLineNumber(number, number_width) + " ", .foreground = muted_foreground | TB_DIM},
-            {.text = std::string(1, marker), .foreground = foreground},
+            {.text = number + " ", .foreground = muted_foreground | TB_DIM},
+            {.text = std::string(1, line.marker), .foreground = colors.foreground},
         },
-        background, added || removed);
+        colors.background, changed);
     const StyledLine continuation = lineWithPrefix(
         {
             {.text = std::string(4 + number_width + 2, ' '), .foreground = TB_DEFAULT},
         },
-        background, added || removed);
-    appendLines(lines, wrapStyledText(text, width, first, continuation, foreground));
+        colors.background, changed);
+    appendLines(lines, wrapStyledText(line.text, width, first, continuation, colors.foreground));
 }
 
 void appendEditLines(std::vector<StyledLine>& lines, const microcodex::EditResult& edit, const int width) {
@@ -878,19 +937,34 @@ void appendEditLines(std::vector<StyledLine>& lines, const microcodex::EditResul
             lines.push_back(std::move(separator));
         }
         if (hunk.context_before) {
-            appendDiffLine(lines, *hunk.context_before, hunk.new_start - 1, number_width, ' ', width);
+            appendDiffLine(lines, number_width,
+                           {.text = *hunk.context_before, .number = hunk.new_start - 1, .marker = ' '}, width);
         }
         for (std::size_t index = 0; index < hunk.removed_lines.size(); ++index) {
-            appendDiffLine(lines, hunk.removed_lines[index], hunk.old_start + index, number_width, '-', width);
+            appendDiffLine(lines, number_width,
+                           {.text = hunk.removed_lines[index], .number = hunk.old_start + index, .marker = '-'}, width);
         }
         for (std::size_t index = 0; index < hunk.added_lines.size(); ++index) {
-            appendDiffLine(lines, hunk.added_lines[index], hunk.new_start + index, number_width, '+', width);
+            appendDiffLine(lines, number_width,
+                           {.text = hunk.added_lines[index], .number = hunk.new_start + index, .marker = '+'}, width);
         }
         if (hunk.context_after) {
-            appendDiffLine(lines, *hunk.context_after, hunk.new_start + hunk.added_lines.size(), number_width, ' ',
-                           width);
+            appendDiffLine(
+                lines, number_width,
+                {.text = *hunk.context_after, .number = hunk.new_start + hunk.added_lines.size(), .marker = ' '},
+                width);
         }
     }
+}
+
+uintattr_t toolBulletColor(const UiEntry& entry) {
+    if (!entry.finished) return muted_foreground;
+    return entry.succeeded ? success_foreground : error_foreground;
+}
+
+std::string_view toolVerb(const UiEntry& entry, const bool is_command) {
+    if (!entry.finished) return "Running ";
+    return is_command ? "Ran " : "Called ";
 }
 
 void appendToolLines(std::vector<StyledLine>& lines, const UiEntry& entry, const int width,
@@ -899,10 +973,9 @@ void appendToolLines(std::vector<StyledLine>& lines, const UiEntry& entry, const
         appendEditLines(lines, *entry.edit, width);
         return;
     }
-    const uintattr_t bullet_color =
-        !entry.finished ? muted_foreground : (entry.succeeded ? success_foreground : error_foreground);
+    const uintattr_t bullet_color = toolBulletColor(entry);
     const std::optional<std::string> command = bashCommand(entry);
-    const std::string_view verb = entry.finished && command ? "Ran " : entry.finished ? "Called " : "Running ";
+    const std::string_view verb = toolVerb(entry, command.has_value());
     const StyledLine header = lineWithPrefix({
         {.text = "• ", .foreground = static_cast<uintattr_t>(bullet_color | TB_BOLD)},
         {.text = std::string(verb), .foreground = TB_DEFAULT | TB_BOLD},
@@ -1061,7 +1134,7 @@ StyledLine footerLine(const UiState& state, const bool turn_active) {
     return line;
 }
 
-void drawLine(const StyledLine& line, const int row, const int width) {
+void drawLine(const int row, const StyledLine& line, const int width) {
     if (row < 0 || row >= tb_height()) {
         return;
     }
@@ -1086,78 +1159,73 @@ int renderWorkingFrame(const UiState& state) {
     }
     StyledLine line = workingLine(state);
     line.fill_background = true;
-    drawLine(line, state.working_row, tb_width());
+    drawLine(state.working_row, line, tb_width());
     return tb_present();
 }
 
-int render(UiState& state, const bool turn_active) {
-    const int width = tb_width();
-    const int height = tb_height();
-    if (width <= 0 || height <= 0) {
-        return TB_OK;
-    }
+// Row budget for everything below the transcript. Active turns use:
+// transcript, spacer, Working, spacer, composer. The composer contributes its
+// own shaded top padding.
+struct ComposerLayout {
+    int working_rows = 0;
+    int composer_spacer_rows = 0;
+    int footer_rows = 0;
+    int composer_padding = 0;
+    int prompt_rows = 0;
+    // First wrapped prompt line shown, chosen to keep the cursor visible.
+    std::size_t prompt_start = 0;
 
-    int result = tb_clear();
-    if (result != TB_OK) {
-        return result;
+    [[nodiscard]] int lowerRows() const {
+        return working_rows + composer_spacer_rows + composer_padding + prompt_rows + footer_rows;
     }
+};
 
-    WrappedText prompt = wrapText(state.input, width, "› ", "  ", state.input_cursor);
-    // Active turns use: transcript, spacer, Working, spacer, composer.
-    // The composer contributes its own shaded top padding after this.
-    const int working_rows = turn_active && height >= 7 ? 3 : 0;
+ComposerLayout composerLayout(const WrappedText& prompt, const int height, const bool turn_active) {
+    ComposerLayout layout;
+    layout.working_rows = turn_active && height >= 7 ? 3 : 0;
     // Without the active-turn area, keep one terminal-background row
     // between the transcript and the composer's shaded surface.
-    const int composer_spacer_rows = working_rows == 0 && height >= 5 ? 1 : 0;
-    const int footer_rows = height >= 2 ? 1 : 0;
-    const int composer_padding = height >= 4 ? 2 : 0;
-    const int available_prompt_rows =
-        std::max(1, height - working_rows - composer_spacer_rows - footer_rows - composer_padding);
+    layout.composer_spacer_rows = layout.working_rows == 0 && height >= 5 ? 1 : 0;
+    layout.footer_rows = height >= 2 ? 1 : 0;
+    layout.composer_padding = height >= 4 ? 2 : 0;
+    const int available_prompt_rows = std::max(
+        1, height - layout.working_rows - layout.composer_spacer_rows - layout.footer_rows - layout.composer_padding);
     const int prompt_limit = std::min({maximum_prompt_rows, std::max(1, height / 3), available_prompt_rows});
-    const int prompt_rows = std::min(prompt_limit, static_cast<int>(prompt.lines.size()));
+    layout.prompt_rows = std::min(prompt_limit, static_cast<int>(prompt.lines.size()));
 
-    std::size_t prompt_start = 0;
-    if (prompt.lines.size() > static_cast<std::size_t>(prompt_rows)) {
-        const std::size_t last_start = prompt.lines.size() - static_cast<std::size_t>(prompt_rows);
-        prompt_start = std::min(prompt.cursor_line, last_start);
-        if (prompt.cursor_line >= prompt_start + static_cast<std::size_t>(prompt_rows)) {
-            prompt_start = prompt.cursor_line - static_cast<std::size_t>(prompt_rows) + 1;
+    const auto prompt_rows = static_cast<std::size_t>(layout.prompt_rows);
+    if (prompt.lines.size() > prompt_rows) {
+        const std::size_t last_start = prompt.lines.size() - prompt_rows;
+        layout.prompt_start = std::min(prompt.cursor_line, last_start);
+        if (prompt.cursor_line >= layout.prompt_start + prompt_rows) {
+            layout.prompt_start = prompt.cursor_line - prompt_rows + 1;
         }
     }
+    return layout;
+}
 
-    const int lower_rows = working_rows + composer_spacer_rows + composer_padding + prompt_rows + footer_rows;
-    const int body_rows = std::max(0, height - lower_rows);
-    std::vector<StyledLine> transcript = transcriptLines(state, width);
-    const std::size_t maximum_scroll = transcript.size() > static_cast<std::size_t>(body_rows)
-                                           ? transcript.size() - static_cast<std::size_t>(body_rows)
-                                           : 0;
+// Draws the bottom of the transcript into the body rows, honoring and
+// clamping the scroll offset.
+void drawTranscript(const int body_rows, UiState& state, const int width) {
+    const std::vector<StyledLine> transcript = transcriptLines(state, width);
+    const auto visible_rows = static_cast<std::size_t>(body_rows);
+    const std::size_t maximum_scroll = transcript.size() > visible_rows ? transcript.size() - visible_rows : 0;
     state.scroll = std::min(state.scroll, maximum_scroll);
 
     const std::size_t transcript_end = transcript.size() - state.scroll;
-    const std::size_t transcript_start =
-        transcript_end > static_cast<std::size_t>(body_rows) ? transcript_end - static_cast<std::size_t>(body_rows) : 0;
+    const std::size_t transcript_start = transcript_end > visible_rows ? transcript_end - visible_rows : 0;
     int row = body_rows - static_cast<int>(transcript_end - transcript_start);
     for (std::size_t index = transcript_start; index < transcript_end; ++index, ++row) {
         if (row >= 0) {
-            drawLine(transcript[index], row, width);
+            drawLine(row, transcript[index], width);
         }
     }
+}
 
-    if (working_rows != 0) {
-        state.working_row = body_rows + 1;
-        drawLine(workingLine(state), state.working_row, width);
-    } else {
-        state.working_row = -1;
-    }
-
-    const int composer_top = body_rows + working_rows + composer_spacer_rows;
-    for (int composer_row = 0; composer_row < composer_padding + prompt_rows; ++composer_row) {
-        drawLine({.spans = {}, .background = surface_background, .fill_background = true}, composer_top + composer_row,
-                 width);
-    }
-    const int prompt_top = composer_top + (composer_padding / 2);
-    for (int prompt_row = 0; prompt_row < prompt_rows; ++prompt_row) {
-        const std::size_t index = prompt_start + static_cast<std::size_t>(prompt_row);
+void drawPrompt(const UiState& state, const WrappedText& prompt, const ComposerLayout& layout, const int prompt_top,
+                const int width) {
+    for (int prompt_row = 0; prompt_row < layout.prompt_rows; ++prompt_row) {
+        const std::size_t index = layout.prompt_start + static_cast<std::size_t>(prompt_row);
         StyledLine line{
             .spans = {},
             .background = surface_background,
@@ -1172,17 +1240,50 @@ int render(UiState& state, const bool turn_active) {
         if (state.input.empty() && index == 0) {
             appendSpan(line, "Ask MicroCodex to do anything", muted_foreground | TB_DIM);
         }
-        drawLine(line, prompt_top + prompt_row, width);
+        drawLine(prompt_top + prompt_row, line, width);
+    }
+}
+
+int render(UiState& state, const bool turn_active) {
+    const int width = tb_width();
+    const int height = tb_height();
+    if (width <= 0 || height <= 0) {
+        return TB_OK;
     }
 
-    if (footer_rows != 0) {
-        drawLine(footerLine(state, turn_active), height - 1, width);
+    int result = tb_clear();
+    if (result != TB_OK) {
+        return result;
     }
 
-    const std::size_t visible_cursor_line = prompt.cursor_line - prompt_start;
+    const WrappedText prompt = wrapText(state.input, width, "› ", "  ", state.input_cursor);
+    const ComposerLayout layout = composerLayout(prompt, height, turn_active);
+    const int body_rows = std::max(0, height - layout.lowerRows());
+    drawTranscript(body_rows, state, width);
+
+    if (layout.working_rows != 0) {
+        state.working_row = body_rows + 1;
+        drawLine(state.working_row, workingLine(state), width);
+    } else {
+        state.working_row = -1;
+    }
+
+    const int composer_top = body_rows + layout.working_rows + layout.composer_spacer_rows;
+    for (int composer_row = 0; composer_row < layout.composer_padding + layout.prompt_rows; ++composer_row) {
+        drawLine(composer_top + composer_row, {.spans = {}, .background = surface_background, .fill_background = true},
+                 width);
+    }
+    const int prompt_top = composer_top + (layout.composer_padding / 2);
+    drawPrompt(state, prompt, layout, prompt_top, width);
+
+    if (layout.footer_rows != 0) {
+        drawLine(height - 1, footerLine(state, turn_active), width);
+    }
+
+    const std::size_t visible_cursor_line = prompt.cursor_line - layout.prompt_start;
     tb_set_cursor(
         prompt.cursor_column,
-        prompt_top + static_cast<int>(std::min(visible_cursor_line, static_cast<std::size_t>(prompt_rows - 1))));
+        prompt_top + static_cast<int>(std::min(visible_cursor_line, static_cast<std::size_t>(layout.prompt_rows - 1))));
     result = tb_present();
     if (result == TB_OK) {
         state.dirty = false;
@@ -1318,53 +1419,68 @@ void appendPastedKey(UiState& state, const tb_event& event) {
     } else if (event.key == TB_KEY_TAB) {
         state.paste += '\t';
     } else if (event.ch != 0) {
-        char utf8[7]{};
-        const int length = tb_utf8_unicode_to_char(utf8, event.ch);
+        std::array<char, 7> utf8{};
+        const int length = tb_utf8_unicode_to_char(utf8.data(), event.ch);
         if (length > 0) {
-            state.paste.append(utf8, static_cast<std::size_t>(length));
+            state.paste.append(utf8.data(), static_cast<std::size_t>(length));
         }
     }
 }
 
-void handleKey(UiState& state, microcodex::CodexApi& api, TurnFuture& turn, const tb_event& event) {
+void moveInputCursor(UiState& state, const std::size_t cursor) {
+    state.input_cursor = cursor;
+    state.dirty = true;
+}
+
+bool hasAlt(const tb_event& event) { return (event.mod & TB_MOD_ALT) != 0; }
+
+// Quit, line jumps, and the Escape-prefixed word jumps many terminals send for
+// option-left and option-right.
+bool handleQuitOrJumpKey(UiState& state, const tb_event& event) {
     if (event.key == TB_KEY_CTRL_Q) {
         state.quitting = true;
-        return;
+        return true;
     }
     if (event.key == TB_KEY_CTRL_A) {
-        state.input_cursor = lineStart(state.input, state.input_cursor);
-        state.dirty = true;
-        return;
+        moveInputCursor(state, lineStart(state.input, state.input_cursor));
+        return true;
     }
     if (event.key == TB_KEY_CTRL_E) {
-        state.input_cursor = lineEnd(state.input, state.input_cursor);
-        state.dirty = true;
-        return;
+        moveInputCursor(state, lineEnd(state.input, state.input_cursor));
+        return true;
     }
-    if ((event.mod & TB_MOD_ALT) != 0 && (event.ch == 'b' || event.ch == 'B')) {
+    if (hasAlt(event) && (event.ch == 'b' || event.ch == 'B')) {
         // Many terminals encode option-left as escape followed by "b".
-        state.input_cursor = previousWord(state.input, state.input_cursor);
-        state.dirty = true;
-        return;
+        moveInputCursor(state, previousWord(state.input, state.input_cursor));
+        return true;
     }
-    if ((event.mod & TB_MOD_ALT) != 0 && (event.ch == 'f' || event.ch == 'F')) {
+    if (hasAlt(event) && (event.ch == 'f' || event.ch == 'F')) {
         // Likewise, option-right is commonly sent as meta-f.
-        state.input_cursor = nextWord(state.input, state.input_cursor);
-        state.dirty = true;
-        return;
+        moveInputCursor(state, nextWord(state.input, state.input_cursor));
+        return true;
     }
+    return false;
+}
+
+void interruptOrClearInput(UiState& state, microcodex::CodexApi& api, const TurnFuture& turn) {
+    if (turn.valid()) {
+        api.interrupt();
+        state.status = "Interrupting turn...";
+    } else if (!state.input.empty() || !state.pending_pastes.empty()) {
+        state.input.clear();
+        state.pending_pastes.clear();
+        state.input_cursor = 0;
+        state.status = "Input cleared";
+    }
+    state.dirty = true;
+}
+
+// Interrupting, quitting with Ctrl-D, resetting, and erasing to either end
+// of the input.
+bool handleControlKey(UiState& state, microcodex::CodexApi& api, const TurnFuture& turn, const tb_event& event) {
     if (event.key == TB_KEY_CTRL_C || event.key == TB_KEY_ESC) {
-        if (turn.valid()) {
-            api.interrupt();
-            state.status = "Interrupting turn...";
-        } else if (!state.input.empty() || !state.pending_pastes.empty()) {
-            state.input.clear();
-            state.pending_pastes.clear();
-            state.input_cursor = 0;
-            state.status = "Input cleared";
-        }
-        state.dirty = true;
-        return;
+        interruptOrClearInput(state, api, turn);
+        return true;
     }
     if (event.key == TB_KEY_CTRL_D) {
         if (!turn.valid() && state.input.empty()) {
@@ -1372,106 +1488,119 @@ void handleKey(UiState& state, microcodex::CodexApi& api, TurnFuture& turn, cons
         } else {
             eraseAtCursor(state);
         }
-        return;
+        return true;
     }
     if (event.key == TB_KEY_CTRL_R) {
         resetConversation(state, api, turn);
-        return;
+        return true;
     }
     if (event.key == TB_KEY_CTRL_U) {
         eraseInputRange(state, 0, state.input_cursor);
-        return;
+        return true;
     }
     if (event.key == TB_KEY_CTRL_K) {
         eraseInputRange(state, state.input_cursor, state.input.size());
-        return;
+        return true;
     }
+    return false;
+}
+
+// Redraw, tool output expansion, newlines, sending, and character erases.
+bool handleEditKey(UiState& state, microcodex::CodexApi& api, TurnFuture& turn, const tb_event& event) {
     if (event.key == TB_KEY_CTRL_L) {
         tb_invalidate();
         state.dirty = true;
-        return;
+        return true;
     }
     if (event.key == TB_KEY_CTRL_T) {
         state.tool_output_expanded = !state.tool_output_expanded;
         state.scroll = 0;
         state.dirty = true;
-        return;
+        return true;
     }
     if (event.key == TB_KEY_CTRL_J) {
         insertCodepoint(state, '\n');
-        return;
+        return true;
     }
     if (event.key == TB_KEY_ENTER) {
         startTurn(state, api, turn);
-        return;
+        return true;
     }
     if (event.key == TB_KEY_BACKSPACE || event.key == TB_KEY_BACKSPACE2) {
-        if ((event.mod & TB_MOD_ALT) != 0) {
+        if (hasAlt(event)) {
             erasePreviousWord(state);
         } else {
             eraseBeforeCursor(state);
         }
-        return;
+        return true;
     }
     if (event.key == TB_KEY_DELETE) {
         eraseAtCursor(state);
-        return;
+        return true;
     }
+    return false;
+}
+
+bool handleCursorKey(UiState& state, const tb_event& event) {
+    const bool word_jump = (event.mod & (TB_MOD_ALT | TB_MOD_CTRL)) != 0;
     if (event.key == TB_KEY_ARROW_LEFT) {
-        state.input_cursor = (event.mod & (TB_MOD_ALT | TB_MOD_CTRL)) != 0
-                                 ? previousWord(state.input, state.input_cursor)
-                                 : previousUtf8(state.input, state.input_cursor);
-        state.dirty = true;
-        return;
+        moveInputCursor(state, word_jump ? previousWord(state.input, state.input_cursor)
+                                         : previousUtf8(state.input, state.input_cursor));
+        return true;
     }
     if (event.key == TB_KEY_ARROW_RIGHT) {
-        state.input_cursor = (event.mod & (TB_MOD_ALT | TB_MOD_CTRL)) != 0 ? nextWord(state.input, state.input_cursor)
-                                                                           : nextUtf8(state.input, state.input_cursor);
-        state.dirty = true;
-        return;
+        moveInputCursor(
+            state, word_jump ? nextWord(state.input, state.input_cursor) : nextUtf8(state.input, state.input_cursor));
+        return true;
     }
-    if ((event.mod & TB_MOD_ALT) != 0 && event.key == TB_KEY_ARROW_UP) {
-        state.input_cursor = lineStart(state.input, state.input_cursor);
-        state.dirty = true;
-        return;
+    if (hasAlt(event) && event.key == TB_KEY_ARROW_UP) {
+        moveInputCursor(state, lineStart(state.input, state.input_cursor));
+        return true;
     }
-    if ((event.mod & TB_MOD_ALT) != 0 && event.key == TB_KEY_ARROW_DOWN) {
-        state.input_cursor = lineEnd(state.input, state.input_cursor);
-        state.dirty = true;
-        return;
+    if (hasAlt(event) && event.key == TB_KEY_ARROW_DOWN) {
+        moveInputCursor(state, lineEnd(state.input, state.input_cursor));
+        return true;
     }
     if (event.key == TB_KEY_HOME) {
-        state.input_cursor = 0;
-        state.dirty = true;
-        return;
+        moveInputCursor(state, 0);
+        return true;
     }
     if (event.key == TB_KEY_END) {
-        state.input_cursor = state.input.size();
-        state.dirty = true;
-        return;
+        moveInputCursor(state, state.input.size());
+        return true;
     }
     if (event.key == TB_KEY_ARROW_UP) {
-        state.input_cursor = moveCursorVertically(state.input, state.input_cursor, -1);
-        state.dirty = true;
-        return;
+        moveInputCursor(state, moveCursorVertically(state.input, state.input_cursor, VerticalDirection::Up));
+        return true;
     }
     if (event.key == TB_KEY_ARROW_DOWN) {
-        state.input_cursor = moveCursorVertically(state.input, state.input_cursor, 1);
-        state.dirty = true;
-        return;
+        moveInputCursor(state, moveCursorVertically(state.input, state.input_cursor, VerticalDirection::Down));
+        return true;
     }
+    return false;
+}
+
+// Page keys scroll by a screen, the mouse wheel by three rows.
+bool handleScrollKey(UiState& state, const tb_event& event) {
+    const auto page = static_cast<std::size_t>(std::max(1, tb_height() - 3));
     if (event.key == TB_KEY_PGUP || event.key == TB_KEY_MOUSE_WHEEL_UP) {
-        const std::size_t amount =
-            event.key == TB_KEY_MOUSE_WHEEL_UP ? 3 : static_cast<std::size_t>(std::max(1, tb_height() - 3));
+        const std::size_t amount = event.key == TB_KEY_MOUSE_WHEEL_UP ? 3 : page;
         state.scroll += amount;
         state.dirty = true;
-        return;
+        return true;
     }
     if (event.key == TB_KEY_PGDN || event.key == TB_KEY_MOUSE_WHEEL_DOWN) {
-        const std::size_t amount =
-            event.key == TB_KEY_MOUSE_WHEEL_DOWN ? 3 : static_cast<std::size_t>(std::max(1, tb_height() - 3));
+        const std::size_t amount = event.key == TB_KEY_MOUSE_WHEEL_DOWN ? 3 : page;
         state.scroll = state.scroll > amount ? state.scroll - amount : 0;
         state.dirty = true;
+        return true;
+    }
+    return false;
+}
+
+void handleKey(UiState& state, microcodex::CodexApi& api, TurnFuture& turn, const tb_event& event) {
+    if (handleQuitOrJumpKey(state, event) || handleControlKey(state, api, turn, event) ||
+        handleEditKey(state, api, turn, event) || handleCursorKey(state, event) || handleScrollKey(state, event)) {
         return;
     }
     if (event.ch != 0 && (tb_iswprint(event.ch) != 0)) {
@@ -1486,6 +1615,40 @@ void stopActiveTurn(UiState& state, PendingEvents& pending, microcodex::CodexApi
     api.interrupt();
     turn.wait();
     collectFinishedTurn(state, pending, turn);
+}
+
+// Applies one terminal event. Keys between the bracketed-paste markers are
+// collected into the pending paste instead of being handled as keys.
+void handleEvent(UiState& state, microcodex::CodexApi& api, TurnFuture& turn, const tb_event& event) {
+    if (event.type == microcodex::terminal::paste_start_event) {
+        state.paste.clear();
+        state.pasting = true;
+    } else if (event.type == microcodex::terminal::paste_end_event) {
+        if (state.pasting) {
+            insertPaste(state);
+            state.pasting = false;
+        }
+    } else if (state.pasting && event.type == TB_EVENT_KEY) {
+        appendPastedKey(state, event);
+    } else if (event.type == TB_EVENT_KEY || event.type == TB_EVENT_MOUSE) {
+        handleKey(state, api, turn, event);
+    } else if (event.type == TB_EVENT_RESIZE) {
+        state.dirty = true;
+    }
+}
+
+// Enables mouse input, bracketed paste, and 256-color output.
+std::expected<void, std::string> configureTerminal() {
+    tb_set_input_mode(TB_INPUT_ESC | TB_INPUT_MOUSE);
+    const int paste_mode = microcodex::terminal::enableBracketedPaste();
+    if (paste_mode != TB_OK) {
+        return std::unexpected("Could not enable terminal paste handling: " + std::string(tb_strerror(paste_mode)));
+    }
+    const int output_mode = tb_set_output_mode(TB_OUTPUT_256);
+    if (output_mode != TB_OK) {
+        return std::unexpected("Could not enable 256-color terminal output: " + std::string(tb_strerror(output_mode)));
+    }
+    return {};
 }
 
 }  // namespace
@@ -1508,15 +1671,8 @@ std::expected<void, std::string> runInteractive(CodexApiConfig config) {
         return std::unexpected("Could not initialize terminal UI: " + std::string(tb_strerror(initialized)));
     }
     const TerminalGuard terminal;
-    tb_set_input_mode(TB_INPUT_ESC | TB_INPUT_MOUSE);
-    const int paste_mode = terminal::enableBracketedPaste();
-    if (paste_mode != TB_OK) {
-        return std::unexpected("Could not enable terminal paste handling: " + std::string(tb_strerror(paste_mode)));
-    }
-    const int output_mode = tb_set_output_mode(TB_OUTPUT_256);
-    if (output_mode != TB_OK) {
-        return std::unexpected("Could not enable 256-color terminal output: " + std::string(tb_strerror(output_mode)));
-    }
+    auto configured = configureTerminal();
+    if (!configured) return configured;
 
     std::string terminal_error;
     while (!state.quitting) {
@@ -1534,21 +1690,7 @@ std::expected<void, std::string> runInteractive(CodexApiConfig config) {
         tb_event event{};
         const int polled = tb_peek_event(&event, turn.valid() ? animation_frame_milliseconds : idle_poll_milliseconds);
         if (polled == TB_OK) {
-            if (event.type == terminal::paste_start_event) {
-                state.paste.clear();
-                state.pasting = true;
-            } else if (event.type == terminal::paste_end_event) {
-                if (state.pasting) {
-                    insertPaste(state);
-                    state.pasting = false;
-                }
-            } else if (state.pasting && event.type == TB_EVENT_KEY) {
-                appendPastedKey(state, event);
-            } else if (event.type == TB_EVENT_KEY || event.type == TB_EVENT_MOUSE) {
-                handleKey(state, api, turn, event);
-            } else if (event.type == TB_EVENT_RESIZE) {
-                state.dirty = true;
-            }
+            handleEvent(state, api, turn, event);
         } else if (polled == TB_ERR_NO_EVENT && turn.valid()) {
             // Only the status row changes between API updates. Redrawing
             // that row avoids re-wrapping and reallocating the transcript

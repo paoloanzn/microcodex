@@ -41,11 +41,14 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <ratio>
 #include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -98,7 +101,13 @@ private:
 };
 
 std::string systemError(const std::string_view operation, const int error_number = errno) {
-    return std::string(operation) + ": " + std::strerror(error_number);
+    return std::string(operation) + ": " + std::generic_category().message(error_number);
+}
+
+// Returns the variable's value, or an empty view when it is unset.
+std::string_view environmentValue(const char* name) {
+    const char* value = std::getenv(name);
+    return value != nullptr ? std::string_view(value) : std::string_view{};
 }
 
 bool containsNewline(const std::string_view value) { return value.find_first_of("\r\n") != std::string_view::npos; }
@@ -106,7 +115,7 @@ bool containsNewline(const std::string_view value) { return value.find_first_of(
 // PKCE and JWTs use the URL-safe Base64 alphabet without '=' padding. These
 // helpers live here instead of pulling in another encoding dependency.
 std::string base64UrlEncode(const std::span<const unsigned char> bytes) {
-    constexpr char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    constexpr std::string_view alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     std::string encoded;
     encoded.reserve((bytes.size() * 4 + 2) / 3);
 
@@ -193,11 +202,11 @@ std::expected<std::string, std::string> base64UrlDecode(std::string_view encoded
 
 // Generates the high-entropy PKCE verifier and anti-CSRF state value.
 std::string randomBase64Url(const std::size_t byte_count) {
-    std::string bytes(byte_count, '\0');
+    std::vector<unsigned char> bytes(byte_count);
     // arc4random_buf is provided by macOS and modern glibc and needs no
     // caller-managed state.
     ::arc4random_buf(bytes.data(), bytes.size());
-    return base64UrlEncode(std::span(reinterpret_cast<const unsigned char*>(bytes.data()), bytes.size()));
+    return base64UrlEncode(bytes);
 }
 
 // RFC 7636 defines an S256 challenge as BASE64URL(SHA256(verifier)).
@@ -207,6 +216,7 @@ std::string sha256Base64Url(const std::string_view value) {
     CC_SHA256(value.data(), static_cast<CC_LONG>(value.size()), digest.data());
 #else
     std::array<unsigned char, SHA256_DIGEST_LENGTH> digest{};
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): OpenSSL hashes unsigned char bytes.
     SHA256(reinterpret_cast<const unsigned char*>(value.data()), value.size(), digest.data());
 #endif
     return base64UrlEncode(digest);
@@ -216,7 +226,7 @@ std::string sha256Base64Url(const std::string_view value) {
 // Spaces deliberately become %20; the authorization server accepts this in
 // application/x-www-form-urlencoded bodies as well as in URLs.
 std::string percentEncode(const std::string_view value) {
-    constexpr char hex[] = "0123456789ABCDEF";
+    constexpr std::string_view hex = "0123456789ABCDEF";
     std::string encoded;
     encoded.reserve(value.size());
     for (const unsigned char character : value) {
@@ -344,6 +354,7 @@ std::expected<BoundListener, SocketError> bindListener(const std::uint16_t port)
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     address.sin_port = htons(port);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): the sockets API takes sockaddr_in as sockaddr.
     if (::bind(listener.get(), reinterpret_cast<const sockaddr*>(&address), sizeof(address)) < 0) {
         const int error = errno;
         return std::unexpected(
@@ -356,6 +367,7 @@ std::expected<BoundListener, SocketError> bindListener(const std::uint16_t port)
     }
 
     socklen_t address_size = sizeof(address);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): the sockets API takes sockaddr_in as sockaddr.
     if (::getsockname(listener.get(), reinterpret_cast<sockaddr*>(&address), &address_size) < 0) {
         const int error = errno;
         return std::unexpected(SocketError{.message = systemError("Could not determine OAuth callback port", error),
@@ -474,20 +486,29 @@ std::expected<HttpRequestLine, std::string> parseHttpRequestLine(const std::stri
 // Always close the connection so browser keep-alive cannot leave the login
 // waiting on an already-handled request. SIGPIPE is suppressed below because
 // browsers are allowed to close the tab before reading our final page.
-void sendHttpResponse(const int connection, const int status, const std::string_view reason,
-                      const std::string_view body) {
-    const std::string response = "HTTP/1.1 " + std::to_string(status) + " " + std::string(reason) +
+struct HttpStatus {
+    int code;
+    std::string_view reason;
+};
+
+constexpr HttpStatus http_ok{.code = 200, .reason = "OK"};
+constexpr HttpStatus http_bad_request{.code = 400, .reason = "Bad Request"};
+constexpr HttpStatus http_not_found{.code = 404, .reason = "Not Found"};
+constexpr HttpStatus http_login_failed{.code = 500, .reason = "Login Failed"};
+
+void sendHttpResponse(const int connection, const HttpStatus status, const std::string_view body) {
+    const std::string response = "HTTP/1.1 " + std::to_string(status.code) + " " + std::string(status.reason) +
                                  "\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: "
                                  "no-store\r\nConnection: "
                                  "close\r\nContent-Length: " +
                                  std::to_string(body.size()) + "\r\n\r\n" + std::string(body);
 
-    std::size_t sent = 0;
-    while (sent < response.size()) {
+    std::string_view unsent = response;
+    while (!unsent.empty()) {
 #ifdef MSG_NOSIGNAL
-        const ssize_t count = ::send(connection, response.data() + sent, response.size() - sent, MSG_NOSIGNAL);
+        const ssize_t count = ::send(connection, unsent.data(), unsent.size(), MSG_NOSIGNAL);
 #else
-        const ssize_t count = ::send(connection, response.data() + sent, response.size() - sent, 0);
+        const ssize_t count = ::send(connection, unsent.data(), unsent.size(), 0);
 #endif
         if (count < 0 && errno == EINTR) {
             continue;
@@ -495,7 +516,7 @@ void sendHttpResponse(const int connection, const int status, const std::string_
         if (count <= 0) {
             return;
         }
-        sent += static_cast<std::size_t>(count);
+        unsent.remove_prefix(static_cast<std::size_t>(count));
     }
 }
 
@@ -523,10 +544,47 @@ std::size_t receiveHttpBody(char* data, const std::size_t size, const std::size_
     return byte_count;
 }
 
+// Reads one request and returns its target when it is a well-formed GET.
+// Anything else is answered with 400, and the caller keeps waiting.
+std::optional<std::string> readGetTarget(const int connection, const std::chrono::steady_clock::time_point deadline) {
+    auto raw_request = readHttpRequest(connection, deadline);
+    if (!raw_request) {
+        sendHttpResponse(connection, http_bad_request, raw_request.error());
+        return std::nullopt;
+    }
+    auto request = parseHttpRequestLine(*raw_request);
+    if (!request || request->method != "GET") {
+        sendHttpResponse(connection, http_bad_request, request ? "OAuth callback must use GET" : request.error());
+        return std::nullopt;
+    }
+    return std::move(request->target);
+}
+
+// Returns the failure an authorization callback reports, if it has one.
+std::optional<std::string> callbackError(const QueryParameters& parameters) {
+    const auto oauth_error = parameters.find("error");
+    if (oauth_error == parameters.end()) {
+        return std::nullopt;
+    }
+    const auto description = parameters.find("error_description");
+    return description == parameters.end() || description->second.empty()
+               ? "OAuth authorization failed: " + oauth_error->second
+               : "OAuth authorization failed: " + description->second;
+}
+
 // Shared token-endpoint transport. The initial code exchange is form encoded,
 // while refresh follows Codex and sends JSON, so content_type stays explicit.
-std::expected<HttpResponse, std::string> postBody(const std::string& url, const std::string& body,
-                                                  const std::string& content_type, const long timeout_seconds) {
+struct TokenPost {
+    std::string url;
+    std::string body;
+    std::string content_type;
+    long timeout_seconds;
+};
+
+std::expected<HttpResponse, std::string> postBody(const TokenPost& request) {
+    const std::string& url = request.url;
+    const std::string& body = request.body;
+    const long timeout_seconds = request.timeout_seconds;
     if (timeout_seconds <= 0) {
         return std::unexpected("OAuth token request timeout must be greater than zero");
     }
@@ -543,22 +601,22 @@ std::expected<HttpResponse, std::string> postBody(const std::string& url, const 
 
     HttpResponse response;
     std::array<char, CURL_ERROR_SIZE> curl_error{};
-    curl_slist* raw_headers = curl_slist_append(nullptr, content_type.c_str());
+    curl_slist* raw_headers = curl_slist_append(nullptr, request.content_type.c_str());
     if (raw_headers == nullptr) {
         return std::unexpected("Could not allocate OAuth request headers");
     }
     const std::unique_ptr<curl_slist, decltype(&curl_slist_free_all)> headers(raw_headers, &curl_slist_free_all);
 
-    const auto setOption = [&curl](const CURLoption option, const auto value) {
+    const auto set_option = [&curl](const CURLoption option, const auto value) {
         return curl_easy_setopt(curl.get(), option, value) == CURLE_OK;
     };
-    if (!setOption(CURLOPT_URL, url.c_str()) || !setOption(CURLOPT_HTTPHEADER, headers.get()) ||
-        !setOption(CURLOPT_POST, 1L) || !setOption(CURLOPT_POSTFIELDS, body.data()) ||
-        !setOption(CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(body.size())) ||
-        !setOption(CURLOPT_WRITEFUNCTION, &receiveHttpBody) || !setOption(CURLOPT_WRITEDATA, &response) ||
-        !setOption(CURLOPT_ERRORBUFFER, curl_error.data()) || !setOption(CURLOPT_USERAGENT, "microcodex") ||
-        !setOption(CURLOPT_CONNECTTIMEOUT, timeout_seconds) || !setOption(CURLOPT_TIMEOUT, timeout_seconds) ||
-        !setOption(CURLOPT_NOSIGNAL, 1L)) {
+    if (!set_option(CURLOPT_URL, url.c_str()) || !set_option(CURLOPT_HTTPHEADER, headers.get()) ||
+        !set_option(CURLOPT_POST, 1L) || !set_option(CURLOPT_POSTFIELDS, body.data()) ||
+        !set_option(CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(body.size())) ||
+        !set_option(CURLOPT_WRITEFUNCTION, &receiveHttpBody) || !set_option(CURLOPT_WRITEDATA, &response) ||
+        !set_option(CURLOPT_ERRORBUFFER, curl_error.data()) || !set_option(CURLOPT_USERAGENT, "microcodex") ||
+        !set_option(CURLOPT_CONNECTTIMEOUT, timeout_seconds) || !set_option(CURLOPT_TIMEOUT, timeout_seconds) ||
+        !set_option(CURLOPT_NOSIGNAL, 1L)) {
         return std::unexpected("Could not configure OAuth token request");
     }
 
@@ -578,13 +636,12 @@ std::expected<HttpResponse, std::string> postBody(const std::string& url, const 
 // Extract only the documented error fields. Never echo a successful token
 // response or arbitrary body because those may contain credentials.
 std::string tokenEndpointError(const std::string_view body, const long status) {
-    auto description = microcodex::json::jsonStringMember(body, "error_description");
-    if (description && description.value()) {
-        return "OAuth token endpoint returned HTTP " + std::to_string(status) + ": " + description.value().value();
-    }
-    auto code = microcodex::json::jsonStringMember(body, "error");
-    if (code && code.value()) {
-        return "OAuth token endpoint returned HTTP " + std::to_string(status) + ": " + code.value().value();
+    for (const std::string_view name : {"error_description", "error"}) {
+        auto member = microcodex::json::jsonStringMember(body, name);
+        if (!member) continue;
+        if (const std::optional<std::string>& message = *member; message) {
+            return "OAuth token endpoint returned HTTP " + std::to_string(status) + ": " + *message;
+        }
     }
     return "OAuth token endpoint returned HTTP " + std::to_string(status);
 }
@@ -597,10 +654,11 @@ std::expected<std::optional<std::string>, std::string> optionalStringOrNull(cons
     if (!member) {
         return std::unexpected(member.error());
     }
-    if (!member.value() || member.value().value() == "null") {
+    const std::optional<std::string_view>& raw_value = *member;
+    if (!raw_value || *raw_value == "null") {
         return std::optional<std::string>{};
     }
-    auto value = microcodex::json::string(member.value().value());
+    auto value = microcodex::json::string(*raw_value);
     if (!value) {
         return std::unexpected("JSON member '" + std::string(name) + "' is not a string or null");
     }
@@ -648,8 +706,10 @@ std::expected<microcodex::OAuthCredentials, std::string> exchangeAuthorizationCo
     const std::string form =
         "grant_type=authorization_code&code=" + percentEncode(code) + "&redirect_uri=" + percentEncode(redirect_uri) +
         "&client_id=" + percentEncode(options.client_id) + "&code_verifier=" + percentEncode(code_verifier);
-    auto response = postBody(endpoint, form, "Content-Type: application/x-www-form-urlencoded",
-                             options.token_request_timeout_seconds);
+    auto response = postBody({.url = endpoint,
+                              .body = form,
+                              .content_type = "Content-Type: application/x-www-form-urlencoded",
+                              .timeout_seconds = options.token_request_timeout_seconds});
     if (!response) {
         return std::unexpected(response.error());
     }
@@ -735,13 +795,15 @@ std::string buildAuthorizationUrl(const microcodex::OAuthOptions& options, const
     }};
 
     std::string url = options.issuer + "/oauth/authorize?";
-    for (std::size_t position = 0; position < parameters.size(); ++position) {
-        if (position != 0) {
+    bool first = true;
+    for (const auto& [name, value] : parameters) {
+        if (!first) {
             url += '&';
         }
-        url += parameters[position].first;
+        first = false;
+        url += name;
         url += '=';
-        url += percentEncode(parameters[position].second);
+        url += percentEncode(value);
     }
     return url;
 }
@@ -758,9 +820,13 @@ std::expected<void, std::string> validateCredentials(const microcodex::OAuthCred
 std::string utcTimestamp() {
     const std::time_t now = std::time(nullptr);
     std::tm utc{};
-    gmtime_r(&now, &utc);
+    if (gmtime_r(&now, &utc) == nullptr) {
+        return {};
+    }
     std::array<char, 32> text{};
-    std::strftime(text.data(), text.size(), "%Y-%m-%dT%H:%M:%SZ", &utc);
+    if (std::strftime(text.data(), text.size(), "%Y-%m-%dT%H:%M:%SZ", &utc) == 0) {
+        return {};
+    }
     return text.data();
 }
 
@@ -788,6 +854,7 @@ std::expected<void, std::string> writeFileAtomically(const std::filesystem::path
     FileDescriptor file;
     for (int attempt = 0; attempt < 10; ++attempt) {
         temporary = path.string() + ".tmp." + randomBase64Url(9);
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): open(2) is variadic for its mode argument.
         file.reset(::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600));
         if (file) {
             break;
@@ -800,7 +867,7 @@ std::expected<void, std::string> writeFileAtomically(const std::filesystem::path
         return std::unexpected("Could not choose a temporary credentials filename");
     }
 
-    const auto discardTemporary = [&temporary]() {
+    const auto discard_temporary = [&temporary]() {
         std::error_code ignored;
         std::filesystem::remove(temporary, ignored);
     };
@@ -813,7 +880,7 @@ std::expected<void, std::string> writeFileAtomically(const std::filesystem::path
         if (count <= 0) {
             const std::string error = systemError("Could not write OAuth credentials");
             file.reset();
-            discardTemporary();
+            discard_temporary();
             return std::unexpected(error);
         }
         written += static_cast<std::size_t>(count);
@@ -821,13 +888,13 @@ std::expected<void, std::string> writeFileAtomically(const std::filesystem::path
     if (::fsync(file.get()) < 0) {
         const std::string error = systemError("Could not flush OAuth credentials");
         file.reset();
-        discardTemporary();
+        discard_temporary();
         return std::unexpected(error);
     }
     file.reset();
     if (::rename(temporary.c_str(), path.c_str()) < 0) {
         const std::string error = systemError("Could not install OAuth credentials file");
-        discardTemporary();
+        discard_temporary();
         return std::unexpected(error);
     }
     return {};
@@ -836,6 +903,7 @@ std::expected<void, std::string> writeFileAtomically(const std::filesystem::path
 // auth.json should be tiny. Bound reads even when the file changes after
 // fstat(), so a corrupted or hostile file cannot allocate unlimited memory.
 std::expected<std::optional<std::string>, std::string> readSmallFile(const std::filesystem::path& path) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): open(2) is variadic for its mode argument.
     const FileDescriptor file(::open(path.c_str(), O_RDONLY));
     if (!file) {
         if (errno == ENOENT) {
@@ -891,8 +959,10 @@ std::expected<OAuthDeviceCode, std::string> startOAuthDeviceLogin(OAuthOptions o
     std::string body = "{\"client_id\":";
     json::appendJsonString(body, options.client_id);
     body += '}';
-    auto response = postBody(options.issuer + "/api/accounts/deviceauth/usercode", body,
-                             "Content-Type: application/json", options.token_request_timeout_seconds);
+    auto response = postBody({.url = options.issuer + "/api/accounts/deviceauth/usercode",
+                              .body = body,
+                              .content_type = "Content-Type: application/json",
+                              .timeout_seconds = options.token_request_timeout_seconds});
     if (!response) {
         return std::unexpected(response.error());
     }
@@ -950,8 +1020,10 @@ std::expected<OAuthCredentials, std::string> finishOAuthDeviceLogin(const OAuthD
 
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
-        auto response = postBody(options.issuer + "/api/accounts/deviceauth/token", body,
-                                 "Content-Type: application/json", options.token_request_timeout_seconds);
+        auto response = postBody({.url = options.issuer + "/api/accounts/deviceauth/token",
+                                  .body = body,
+                                  .content_type = "Content-Type: application/json",
+                                  .timeout_seconds = options.token_request_timeout_seconds});
         if (!response) {
             return std::unexpected(response.error());
         }
@@ -964,7 +1036,7 @@ std::expected<OAuthCredentials, std::string> finishOAuthDeviceLogin(const OAuthD
                 break;
             }
             const auto remaining = std::chrono::duration_cast<std::chrono::seconds>(deadline - now);
-            ::sleep(static_cast<unsigned>(std::min(login.interval, remaining).count()));
+            std::this_thread::sleep_for(std::min(login.interval, remaining));
             continue;
         }
         if (response->status < 200 || response->status >= 300) {
@@ -1067,80 +1139,76 @@ std::expected<OAuthCredentials, std::string> OAuthLogin::finish(const std::chron
             cancel();
             return std::unexpected(connection.error());
         }
-        auto raw_request = readHttpRequest(connection->get(), deadline);
-        if (!raw_request) {
-            sendHttpResponse(connection->get(), 400, "Bad Request", raw_request.error());
-            continue;
+        if (auto result = handleCallback(connection->get(), deadline)) {
+            return std::move(*result);
         }
-        auto request = parseHttpRequestLine(raw_request.value());
-        if (!request || request->method != "GET") {
-            sendHttpResponse(connection->get(), 400, "Bad Request",
-                             request ? "OAuth callback must use GET" : request.error());
-            continue;
-        }
-
-        const std::size_t question = request->target.find('?');
-        const std::string_view path = std::string_view(request->target).substr(0, question);
-        const std::string_view query =
-            question == std::string::npos ? std::string_view{} : std::string_view(request->target).substr(question + 1);
-        if (path == "/cancel") {
-            sendHttpResponse(connection->get(), 200, "OK", "Login cancelled.");
-            cancel();
-            return std::unexpected("OAuth login was cancelled");
-        }
-        if (path != "/auth/callback") {
-            sendHttpResponse(connection->get(), 404, "Not Found", "Not Found");
-            continue;
-        }
-
-        auto parameters = parseQuery(query);
-        if (!parameters) {
-            sendHttpResponse(connection->get(), 400, "Bad Request", parameters.error());
-            continue;
-        }
-        // State authenticates the localhost callback and prevents another
-        // page or process from completing this login attempt with its code.
-        const auto state = parameters->find("state");
-        if (state == parameters->end() || !constantTimeEqual(state->second, implementation_->state)) {
-            sendHttpResponse(connection->get(), 400, "Bad Request", "OAuth state mismatch");
-            continue;
-        }
-
-        const auto oauth_error = parameters->find("error");
-        if (oauth_error != parameters->end()) {
-            const auto description = parameters->find("error_description");
-            const std::string message = description == parameters->end() || description->second.empty()
-                                            ? "OAuth authorization failed: " + oauth_error->second
-                                            : "OAuth authorization failed: " + description->second;
-            sendHttpResponse(connection->get(), 400, "Bad Request", message);
-            cancel();
-            return std::unexpected(message);
-        }
-
-        const auto code = parameters->find("code");
-        if (code == parameters->end() || code->second.empty()) {
-            const std::string message = "OAuth callback has no authorization code";
-            sendHttpResponse(connection->get(), 400, "Bad Request", message);
-            cancel();
-            return std::unexpected(message);
-        }
-
-        // The callback has been authenticated by state. Stop accepting
-        // requests before the network exchange so there is only one
-        // terminal callback.
-        implementation_->listener.reset();
-        auto credentials = exchangeAuthorizationCode(implementation_->options, implementation_->redirect_uri,
-                                                     implementation_->code_verifier, code->second);
-        implementation_->code_verifier.clear();
-        implementation_->state.clear();
-        if (!credentials) {
-            sendHttpResponse(connection->get(), 500, "Login Failed", credentials.error());
-            return std::unexpected(credentials.error());
-        }
-        sendHttpResponse(connection->get(), 200, "OK", "Login complete. You can close this browser window.");
-        return credentials;
     }
     return std::unexpected("OAuth login was cancelled");
+}
+
+std::optional<std::expected<OAuthCredentials, std::string>> OAuthLogin::handleCallback(
+    const int connection, const std::chrono::steady_clock::time_point deadline) {
+    using Result = std::expected<OAuthCredentials, std::string>;
+    const std::optional<std::string> target = readGetTarget(connection, deadline);
+    if (!target) {
+        return std::nullopt;
+    }
+
+    const std::size_t question = target->find('?');
+    const std::string_view path = std::string_view(*target).substr(0, question);
+    const std::string_view query =
+        question == std::string::npos ? std::string_view{} : std::string_view(*target).substr(question + 1);
+    if (path == "/cancel") {
+        sendHttpResponse(connection, http_ok, "Login cancelled.");
+        cancel();
+        return Result(std::unexpected("OAuth login was cancelled"));
+    }
+    if (path != "/auth/callback") {
+        sendHttpResponse(connection, http_not_found, "Not Found");
+        return std::nullopt;
+    }
+
+    auto parameters = parseQuery(query);
+    if (!parameters) {
+        sendHttpResponse(connection, http_bad_request, parameters.error());
+        return std::nullopt;
+    }
+    // State authenticates the localhost callback and prevents another
+    // page or process from completing this login attempt with its code.
+    const auto state = parameters->find("state");
+    if (state == parameters->end() || !constantTimeEqual(state->second, implementation_->state)) {
+        sendHttpResponse(connection, http_bad_request, "OAuth state mismatch");
+        return std::nullopt;
+    }
+
+    if (const std::optional<std::string> message = callbackError(*parameters)) {
+        sendHttpResponse(connection, http_bad_request, *message);
+        cancel();
+        return Result(std::unexpected(*message));
+    }
+
+    const auto code = parameters->find("code");
+    if (code == parameters->end() || code->second.empty()) {
+        const std::string message = "OAuth callback has no authorization code";
+        sendHttpResponse(connection, http_bad_request, message);
+        cancel();
+        return Result(std::unexpected(message));
+    }
+
+    // The callback has been authenticated by state. Stop accepting
+    // requests before the network exchange so there is only one
+    // terminal callback.
+    implementation_->listener.reset();
+    auto credentials = exchangeAuthorizationCode(implementation_->options, implementation_->redirect_uri,
+                                                 implementation_->code_verifier, code->second);
+    implementation_->code_verifier.clear();
+    implementation_->state.clear();
+    if (!credentials) {
+        sendHttpResponse(connection, http_login_failed, credentials.error());
+        return Result(std::unexpected(credentials.error()));
+    }
+    sendHttpResponse(connection, http_ok, "Login complete. You can close this browser window.");
+    return credentials;
 }
 
 void OAuthLogin::cancel() {
@@ -1154,10 +1222,10 @@ void OAuthLogin::cancel() {
 // Match Codex's path resolution so both programs can consume the same
 // auth.json when the user opts into CODEX_HOME.
 std::expected<std::filesystem::path, std::string> defaultOAuthCredentialsPath() {
-    if (const char* codex_home = std::getenv("CODEX_HOME"); codex_home != nullptr && codex_home[0] != '\0') {
+    if (const std::string_view codex_home = environmentValue("CODEX_HOME"); !codex_home.empty()) {
         return std::filesystem::path(codex_home) / "auth.json";
     }
-    if (const char* user_home = std::getenv("HOME"); user_home != nullptr && user_home[0] != '\0') {
+    if (const std::string_view user_home = environmentValue("HOME"); !user_home.empty()) {
         return std::filesystem::path(user_home) / ".codex" / "auth.json";
     }
     return std::unexpected("Cannot find OAuth credentials path: HOME is not set");
@@ -1168,28 +1236,30 @@ std::expected<std::optional<OAuthCredentials>, std::string> loadOAuthCredentials
     if (!contents) {
         return std::unexpected(contents.error());
     }
-    if (!contents.value()) {
+    const std::optional<std::string>& file_contents = *contents;
+    if (!file_contents) {
         return std::optional<OAuthCredentials>{};
     }
 
     // Ignore unrelated Codex fields and read only the token object this API
     // owns. That keeps the loader compatible as auth.json grows new fields.
-    auto tokens = json::findJsonMember(contents.value().value(), "tokens");
+    auto tokens = json::findJsonMember(*file_contents, "tokens");
     if (!tokens) {
         return std::unexpected("Could not parse OAuth credentials: " + tokens.error());
     }
-    if (!tokens.value()) {
+    const std::optional<std::string_view>& token_set = *tokens;
+    if (!token_set) {
         return std::unexpected("OAuth credentials file has no token set");
     }
 
-    auto access_token = json::requiredJsonString(tokens.value().value(), "access_token");
-    auto id_token = json::requiredJsonString(tokens.value().value(), "id_token");
-    auto refresh_token = json::requiredJsonString(tokens.value().value(), "refresh_token");
+    auto access_token = json::requiredJsonString(*token_set, "access_token");
+    auto id_token = json::requiredJsonString(*token_set, "id_token");
+    auto refresh_token = json::requiredJsonString(*token_set, "refresh_token");
     if (!access_token || !id_token || !refresh_token) {
         return std::unexpected("OAuth credentials file has an incomplete token set");
     }
 
-    auto account = optionalStringOrNull(tokens.value().value(), "account_id");
+    auto account = optionalStringOrNull(*token_set, "account_id");
     if (!account) {
         return std::unexpected("Could not parse OAuth credentials account ID: " + account.error());
     }
@@ -1267,8 +1337,10 @@ std::expected<OAuthCredentials, std::string> refreshOAuthCredentials(const OAuth
     body += R"(,"grant_type":"refresh_token","refresh_token":)";
     json::appendJsonString(body, credentials.refresh_token);
     body += '}';
-    auto response = postBody(options.issuer + "/oauth/token", body, "Content-Type: application/json",
-                             options.token_request_timeout_seconds);
+    auto response = postBody({.url = options.issuer + "/oauth/token",
+                              .body = body,
+                              .content_type = "Content-Type: application/json",
+                              .timeout_seconds = options.token_request_timeout_seconds});
     if (!response) {
         return std::unexpected(response.error());
     }
@@ -1290,16 +1362,17 @@ std::expected<OAuthCredentials, std::string> refreshOAuthCredentials(const OAuth
     if (!id_token || !refresh_token) {
         return std::unexpected("OAuth refresh response contains an invalid token");
     }
-    if (id_token.value() && !id_token.value()->empty()) {
-        refreshed.id_token = std::move(id_token.value().value());
+    if (std::optional<std::string>& new_id_token = *id_token; new_id_token && !new_id_token->empty()) {
+        refreshed.id_token = std::move(*new_id_token);
         auto account_id = accountIdFromIdToken(refreshed.id_token);
         if (!account_id) {
             return std::unexpected(account_id.error());
         }
         refreshed.account_id = std::move(account_id.value());
     }
-    if (refresh_token.value() && !refresh_token.value()->empty()) {
-        refreshed.refresh_token = std::move(refresh_token.value().value());
+    if (std::optional<std::string>& new_refresh_token = *refresh_token;
+        new_refresh_token && !new_refresh_token->empty()) {
+        refreshed.refresh_token = std::move(*new_refresh_token);
     }
     return refreshed;
 }

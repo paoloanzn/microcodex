@@ -66,7 +66,7 @@ public:
                                                                          const CompactionPlan& plan,
                                                                          std::string summary) const;
 
-    [[nodiscard]] std::string_view summaryInstructions() const;
+    [[nodiscard]] static std::string_view summaryInstructions();
 
 private:
     CompactionConfig config_;

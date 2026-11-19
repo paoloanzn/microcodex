@@ -34,10 +34,10 @@ void CodexEventEmitter::emit(const CodexEvent& event) const noexcept {
         // Invoke outside the mutex. A handler may replace itself or ask
         // CodexApi to interrupt the active turn without deadlocking here.
         handler(event);
-    } catch (...) {
         // Presentation code must not be able to corrupt conversation state
         // or strand an in-flight turn by throwing through the emitter.
-    }
+        // NOLINTNEXTLINE(bugprone-empty-catch): handler failures are deliberately dropped.
+    } catch (...) {}
 }
 
 }  // namespace microcodex

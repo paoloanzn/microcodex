@@ -19,6 +19,7 @@
 #include <expected>
 #include <filesystem>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <stop_token>
 #include <string>
@@ -55,6 +56,157 @@ void killAndReap(const pid_t pid) {
     while (waitpid(pid, &status, 0) == -1 && errno == EINTR) {}
 }
 
+std::string systemError(const std::string_view operation, const int error_number) {
+    return std::string(operation) + ": " + std::generic_category().message(error_number);
+}
+
+using PipeDescriptors = std::array<int, 2>;
+constexpr nfds_t stream_count = 2;
+
+void createPipes(PipeDescriptors& stdout_pipe, PipeDescriptors& stderr_pipe) {
+    if (pipe(stdout_pipe.data()) == -1) {
+        throw std::runtime_error(systemError("pipe failed", errno));
+    }
+    if (pipe(stderr_pipe.data()) == -1) {
+        const int error_number = errno;
+        closeDescriptor(stdout_pipe[0]);
+        closeDescriptor(stdout_pipe[1]);
+        throw std::runtime_error(systemError("pipe failed", error_number));
+    }
+}
+
+// Runs in the forked child: redirects output into the pipes and execs the
+// command. Only async-signal-safe calls are allowed here.
+[[noreturn]] void execChild(PipeDescriptors& stdout_pipe, PipeDescriptors& stderr_pipe, std::vector<char*>& argv) {
+    closeDescriptor(stdout_pipe[0]);
+    closeDescriptor(stderr_pipe[0]);
+
+    // A separate group lets interruption terminate the whole command
+    // tree instead of leaving grandchildren running in the background.
+    setpgid(0, 0);
+    if (dup2(stdout_pipe[1], STDOUT_FILENO) == -1 || dup2(stderr_pipe[1], STDERR_FILENO) == -1) {
+        _exit(126);
+    }
+    closeDescriptor(stdout_pipe[1]);
+    closeDescriptor(stderr_pipe[1]);
+
+    execvp(argv.front(), argv.data());
+
+    // execvp() returns only on failure. Use the C system call here
+    // because C++ streams are not safe after fork in a multithreaded process.
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): the forked child runs a single thread and must not allocate.
+    const char* message = std::strerror(errno);
+    // Nothing can report a failed write from here, so the results are dropped.
+    [[maybe_unused]] const ssize_t message_written = ::write(STDERR_FILENO, message, std::strlen(message));
+    [[maybe_unused]] const ssize_t newline_written = ::write(STDERR_FILENO, "\n", 1);
+    _exit(127);
+}
+
+// Everything the parent tracks while it waits for the child and drains its
+// stdout and stderr pipes.
+struct ChildProcess {
+    pid_t pid = -1;
+    std::array<pollfd, stream_count> descriptors{};
+    int open_streams = 2;
+    int status = 0;
+    bool exited = false;
+    bool sent_interrupt = false;
+    bool sent_kill = false;
+    bool timed_out = false;
+    std::chrono::steady_clock::time_point interrupt_time;
+};
+
+// Kills the child at the deadline, interrupts it on stop, and escalates an
+// interrupt that has been ignored for a second.
+void signalChild(ChildProcess& child, const std::stop_token& stop_token,
+                 const std::optional<std::chrono::steady_clock::time_point>& deadline) {
+    if (child.exited) return;
+    if (deadline && std::chrono::steady_clock::now() >= *deadline && !child.sent_kill) {
+        signalProcess(child.pid, SIGKILL);
+        child.sent_kill = true;
+        child.timed_out = true;
+    }
+    if (stop_token.stop_requested() && !child.sent_interrupt) {
+        signalProcess(child.pid, SIGINT);
+        child.sent_interrupt = true;
+        child.interrupt_time = std::chrono::steady_clock::now();
+    }
+    if (child.sent_interrupt && !child.sent_kill &&
+        std::chrono::steady_clock::now() - child.interrupt_time >= std::chrono::seconds(1)) {
+        // SIGINT gives well-behaved commands time to clean up. SIGKILL
+        // guarantees that interrupt() cannot wait forever otherwise.
+        signalProcess(child.pid, SIGKILL);
+        child.sent_kill = true;
+    }
+}
+
+void reapChild(ChildProcess& child) {
+    if (child.exited) return;
+    const pid_t wait_result = waitpid(child.pid, &child.status, WNOHANG);
+    if (wait_result == child.pid) {
+        child.exited = true;
+    } else if (wait_result == -1 && errno != EINTR) {
+        const int error_number = errno;
+        closeDescriptor(child.descriptors[0].fd);
+        closeDescriptor(child.descriptors[1].fd);
+        throw std::runtime_error(systemError("waitpid failed", error_number));
+    }
+}
+
+// Waits briefly for output. Returns false when there is nothing to read yet.
+bool waitForOutput(ChildProcess& child) {
+    if (child.open_streams == 0) {
+        // poll() with no live descriptors provides a short cancellable
+        // wait while the process finishes after closing its streams.
+        poll(nullptr, 0, 50);
+        return false;
+    }
+
+    const int poll_result = poll(child.descriptors.data(), stream_count, 100);
+    if (poll_result == -1) {
+        if (errno == EINTR) {
+            return false;
+        }
+        const int error_number = errno;
+        closeDescriptor(child.descriptors[0].fd);
+        closeDescriptor(child.descriptors[1].fd);
+        killAndReap(child.pid);
+        throw std::runtime_error(systemError("poll failed", error_number));
+    }
+    return true;
+}
+
+void readStream(pollfd& descriptor, std::string& destination, const std::span<char> buffer, int& open_streams) {
+    if (descriptor.fd == -1) {
+        return;
+    }
+
+    if ((descriptor.revents & (POLLIN | POLLHUP)) != 0) {
+        const ssize_t count = ::read(descriptor.fd, buffer.data(), buffer.size());
+        if (count > 0) {
+            destination.append(buffer.data(), static_cast<std::size_t>(count));
+        } else if (count == 0 || errno != EINTR) {
+            closeDescriptor(descriptor.fd);
+            --open_streams;
+        }
+    }
+
+    if (descriptor.fd != -1 && (descriptor.revents & (POLLERR | POLLNVAL)) != 0) {
+        closeDescriptor(descriptor.fd);
+        --open_streams;
+    }
+}
+
+int exitCode(const int status) {
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+    if (WIFSIGNALED(status)) {
+        return 128 + WTERMSIG(status);
+    }
+    return -1;
+}
+
 microcodex::BashCommandResult runProcess(
     const std::vector<std::string>& arguments, const std::stop_token stop_token,
     const std::optional<std::chrono::steady_clock::time_point> deadline = std::nullopt) {
@@ -65,56 +217,31 @@ microcodex::BashCommandResult runProcess(
         throw std::invalid_argument("command must not be empty");
     }
 
+    // execvp() takes mutable strings, so it gets its own copies.
+    std::vector<std::string> writable_arguments = arguments;
     std::vector<char*> argv;
-    argv.reserve(arguments.size() + 1);
-    for (const std::string& argument : arguments) {
-        argv.push_back(const_cast<char*>(argument.c_str()));
+    argv.reserve(writable_arguments.size() + 1);
+    for (std::string& argument : writable_arguments) {
+        argv.push_back(argument.data());
     }
     // execvp() requires a null-terminated argument vector.
     argv.push_back(nullptr);
 
-    int stdout_pipe[2]{-1, -1};
-    int stderr_pipe[2]{-1, -1};
-    if (pipe(stdout_pipe) == -1) {
-        throw std::runtime_error(std::string("pipe failed: ") + std::strerror(errno));
-    }
-    if (pipe(stderr_pipe) == -1) {
-        closeDescriptor(stdout_pipe[0]);
-        closeDescriptor(stdout_pipe[1]);
-        throw std::runtime_error(std::string("pipe failed: ") + std::strerror(errno));
-    }
+    PipeDescriptors stdout_pipe{-1, -1};
+    PipeDescriptors stderr_pipe{-1, -1};
+    createPipes(stdout_pipe, stderr_pipe);
 
     const pid_t pid = fork();
     if (pid == -1) {
+        const int error_number = errno;
         closeDescriptor(stdout_pipe[0]);
         closeDescriptor(stdout_pipe[1]);
         closeDescriptor(stderr_pipe[0]);
         closeDescriptor(stderr_pipe[1]);
-        throw std::runtime_error(std::string("fork failed: ") + std::strerror(errno));
+        throw std::runtime_error(systemError("fork failed", error_number));
     }
-
     if (pid == 0) {
-        closeDescriptor(stdout_pipe[0]);
-        closeDescriptor(stderr_pipe[0]);
-
-        // A separate group lets interruption terminate the whole command
-        // tree instead of leaving grandchildren running in the background.
-        setpgid(0, 0);
-        if (dup2(stdout_pipe[1], STDOUT_FILENO) == -1 || dup2(stderr_pipe[1], STDERR_FILENO) == -1) {
-            _exit(126);
-        }
-        closeDescriptor(stdout_pipe[1]);
-        closeDescriptor(stderr_pipe[1]);
-
-        execvp(argv[0], argv.data());
-
-        // execvp() returns only on failure. Use the C system call here
-        // because C++ streams are not safe after fork in a multithreaded process.
-        const char* message = std::strerror(errno);
-        // Nothing can report a failed write from here, so the results are dropped.
-        [[maybe_unused]] const ssize_t message_written = ::write(STDERR_FILENO, message, std::strlen(message));
-        [[maybe_unused]] const ssize_t newline_written = ::write(STDERR_FILENO, "\n", 1);
-        _exit(127);
+        execChild(stdout_pipe, stderr_pipe, argv);
     }
 
     closeDescriptor(stdout_pipe[1]);
@@ -126,102 +253,26 @@ microcodex::BashCommandResult runProcess(
 
     microcodex::BashCommandResult result{};
     std::array<char, 4096> buffer{};
-    pollfd descriptors[2]{{.fd = stdout_pipe[0], .events = POLLIN, .revents = 0},
-                          {.fd = stderr_pipe[0], .events = POLLIN, .revents = 0}};
-    int open_streams = 2;
-    int status = 0;
-    bool child_exited = false;
-    bool sent_interrupt = false;
-    bool sent_kill = false;
-    bool timed_out = false;
-    std::chrono::steady_clock::time_point interrupt_time;
+    ChildProcess child{
+        .pid = pid,
+        .descriptors = {{{.fd = stdout_pipe[0], .events = POLLIN, .revents = 0},
+                         {.fd = stderr_pipe[0], .events = POLLIN, .revents = 0}}},
+    };
 
-    while (open_streams > 0 || !child_exited) {
-        if (deadline && std::chrono::steady_clock::now() >= *deadline && !sent_kill && !child_exited) {
-            signalProcess(pid, SIGKILL);
-            sent_kill = true;
-            timed_out = true;
-        }
-        if (stop_token.stop_requested() && !sent_interrupt && !child_exited) {
-            signalProcess(pid, SIGINT);
-            sent_interrupt = true;
-            interrupt_time = std::chrono::steady_clock::now();
-        }
-        if (sent_interrupt && !sent_kill && !child_exited &&
-            std::chrono::steady_clock::now() - interrupt_time >= std::chrono::seconds(1)) {
-            // SIGINT gives well-behaved commands time to clean up. SIGKILL
-            // guarantees that interrupt() cannot wait forever otherwise.
-            signalProcess(pid, SIGKILL);
-            sent_kill = true;
-        }
-
-        if (!child_exited) {
-            const pid_t wait_result = waitpid(pid, &status, WNOHANG);
-            if (wait_result == pid) {
-                child_exited = true;
-            } else if (wait_result == -1 && errno != EINTR) {
-                closeDescriptor(descriptors[0].fd);
-                closeDescriptor(descriptors[1].fd);
-                throw std::runtime_error(std::string("waitpid failed: ") + std::strerror(errno));
-            }
-        }
-
-        if (open_streams == 0) {
-            // poll() with no live descriptors provides a short cancellable
-            // wait while the process finishes after closing its streams.
-            poll(nullptr, 0, 50);
+    while (child.open_streams > 0 || !child.exited) {
+        signalChild(child, stop_token, deadline);
+        reapChild(child);
+        if (!waitForOutput(child)) {
             continue;
         }
-
-        const int poll_result = poll(descriptors, 2, 100);
-        if (poll_result == -1) {
-            if (errno == EINTR) {
-                continue;
-            }
-            closeDescriptor(descriptors[0].fd);
-            closeDescriptor(descriptors[1].fd);
-            killAndReap(pid);
-            throw std::runtime_error(std::string("poll failed: ") + std::strerror(errno));
-        }
-
-        for (std::size_t index = 0; index < 2; ++index) {
-            pollfd& descriptor = descriptors[index];
-            if (descriptor.fd == -1) {
-                continue;
-            }
-
-            if ((descriptor.revents & (POLLIN | POLLHUP)) != 0) {
-                const ssize_t count = ::read(descriptor.fd, buffer.data(), buffer.size());
-                if (count > 0) {
-                    std::string& destination = index == 0 ? result.stdout : result.stderr;
-                    destination.append(buffer.data(), static_cast<std::size_t>(count));
-                } else if (count == 0) {
-                    closeDescriptor(descriptor.fd);
-                    --open_streams;
-                } else if (errno != EINTR) {
-                    closeDescriptor(descriptor.fd);
-                    --open_streams;
-                }
-            }
-
-            if (descriptor.fd != -1 && (descriptor.revents & (POLLERR | POLLNVAL)) != 0) {
-                closeDescriptor(descriptor.fd);
-                --open_streams;
-            }
-        }
+        readStream(child.descriptors[0], result.stdout, buffer, child.open_streams);
+        readStream(child.descriptors[1], result.stderr, buffer, child.open_streams);
     }
 
-    if (timed_out) {
+    if (child.timed_out) {
         throw std::runtime_error("Command timed out");
     }
-
-    if (WIFEXITED(status)) {
-        result.error_code = WEXITSTATUS(status);
-    } else if (WIFSIGNALED(status)) {
-        result.error_code = 128 + WTERMSIG(status);
-    } else {
-        result.error_code = -1;
-    }
+    result.error_code = exitCode(child.status);
     return result;
 }
 
@@ -253,8 +304,8 @@ class UserShellContext {
 public:
     explicit UserShellContext(const std::stop_token stop_token) {
         const char* configured = std::getenv("SHELL");
-        shell_ = configured != nullptr && configured[0] != '\0' ? std::filesystem::path(configured)
-                                                                : std::filesystem::path("/bin/sh");
+        const std::string_view configured_shell = configured != nullptr ? configured : "";
+        shell_ = configured_shell.empty() ? std::filesystem::path("/bin/sh") : std::filesystem::path(configured_shell);
         std::error_code error;
         if (!std::filesystem::is_regular_file(shell_, error)) {
             shell_ = "/bin/sh";
@@ -272,16 +323,9 @@ public:
 
         const std::string snapshot_path = shellSingleQuote(snapshot_.string());
         const std::string script = shellRcPrefix(shell_) + "unset PWD OLDPWD; export -p > '" + snapshot_path + "'";
-        try {
-            const auto captured = runProcess({shell_.string(), "-lc", script}, stop_token,
-                                             std::chrono::steady_clock::now() + std::chrono::seconds(10));
-            if (captured.error_code == 0 && std::filesystem::file_size(snapshot_, error) != 0 && !error) {
-                valid_snapshot_ = true;
-                return;
-            }
-        } catch (...) {
-            // Shell startup is best-effort. The fallback below still uses
-            // the user's login shell and sources its interactive rc file.
+        if (captureSnapshot(script, stop_token)) {
+            valid_snapshot_ = true;
+            return;
         }
         std::filesystem::remove(snapshot_, error);
         snapshot_.clear();
@@ -289,6 +333,8 @@ public:
 
     UserShellContext(const UserShellContext&) = delete;
     UserShellContext& operator=(const UserShellContext&) = delete;
+    UserShellContext(UserShellContext&&) = delete;
+    UserShellContext& operator=(UserShellContext&&) = delete;
 
     ~UserShellContext() {
         if (!snapshot_.empty()) {
@@ -314,6 +360,20 @@ public:
     }
 
 private:
+    // Runs the login shell once to export its environment into snapshot_.
+    // Shell startup is best-effort: on any failure the caller falls back to
+    // the user's login shell, which still sources its interactive rc file.
+    [[nodiscard]] bool captureSnapshot(const std::string& script, const std::stop_token stop_token) const {
+        try {
+            const auto captured = runProcess({shell_.string(), "-lc", script}, stop_token,
+                                             std::chrono::steady_clock::now() + std::chrono::seconds(10));
+            std::error_code error;
+            return captured.error_code == 0 && std::filesystem::file_size(snapshot_, error) != 0 && !error;
+        } catch (...) {
+            return false;
+        }
+    }
+
     std::filesystem::path shell_;
     std::filesystem::path snapshot_;
     bool valid_snapshot_ = false;

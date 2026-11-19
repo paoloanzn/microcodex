@@ -23,6 +23,8 @@ public:
     CurlHeaders() = default;
     CurlHeaders(const CurlHeaders&) = delete;
     CurlHeaders& operator=(const CurlHeaders&) = delete;
+    CurlHeaders(CurlHeaders&&) = delete;
+    CurlHeaders& operator=(CurlHeaders&&) = delete;
     ~CurlHeaders() { curl_slist_free_all(headers_); }
 
     bool append(const std::string& header) {
@@ -135,33 +137,33 @@ std::expected<HttpResponse, std::string> performHttpRequest(const HttpRequest& r
     };
     const std::string url(request.url);
     std::array<char, CURL_ERROR_SIZE> curl_error{};
-    const auto setOption = [&curl](const CURLoption option, const auto value) {
+    const auto set_option = [&curl](const CURLoption option, const auto value) {
         return curl_easy_setopt(curl.get(), option, value) == CURLE_OK;
     };
 
-    if (!setOption(CURLOPT_URL, url.c_str()) || !setOption(CURLOPT_HTTPHEADER, headers.get()) ||
-        !setOption(CURLOPT_WRITEFUNCTION, &receiveBody) || !setOption(CURLOPT_WRITEDATA, &state) ||
-        !setOption(CURLOPT_HEADERFUNCTION, &receiveHeader) || !setOption(CURLOPT_HEADERDATA, &state) ||
-        !setOption(CURLOPT_XFERINFOFUNCTION, &transferProgress) || !setOption(CURLOPT_XFERINFODATA, &state) ||
-        !setOption(CURLOPT_NOPROGRESS, 0L) || !setOption(CURLOPT_ERRORBUFFER, curl_error.data()) ||
-        !setOption(CURLOPT_USERAGENT, "microcodex") || !setOption(CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS) ||
-        !setOption(CURLOPT_NOSIGNAL, 1L)) {
+    if (!set_option(CURLOPT_URL, url.c_str()) || !set_option(CURLOPT_HTTPHEADER, headers.get()) ||
+        !set_option(CURLOPT_WRITEFUNCTION, &receiveBody) || !set_option(CURLOPT_WRITEDATA, &state) ||
+        !set_option(CURLOPT_HEADERFUNCTION, &receiveHeader) || !set_option(CURLOPT_HEADERDATA, &state) ||
+        !set_option(CURLOPT_XFERINFOFUNCTION, &transferProgress) || !set_option(CURLOPT_XFERINFODATA, &state) ||
+        !set_option(CURLOPT_NOPROGRESS, 0L) || !set_option(CURLOPT_ERRORBUFFER, curl_error.data()) ||
+        !set_option(CURLOPT_USERAGENT, "microcodex") || !set_option(CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS) ||
+        !set_option(CURLOPT_NOSIGNAL, 1L)) {
         return std::unexpected("Could not configure HTTP request");
     }
 
     if (request.method == HttpMethod::Post &&
-        (!setOption(CURLOPT_POST, 1L) || !setOption(CURLOPT_POSTFIELDS, request.body.data()) ||
-         !setOption(CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(request.body.size())))) {
+        (!set_option(CURLOPT_POST, 1L) || !set_option(CURLOPT_POSTFIELDS, request.body.data()) ||
+         !set_option(CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(request.body.size())))) {
         return std::unexpected("Could not configure HTTP request body");
     }
-    if (request.method == HttpMethod::Get && !setOption(CURLOPT_HTTPGET, 1L)) {
+    if (request.method == HttpMethod::Get && !set_option(CURLOPT_HTTPGET, 1L)) {
         return std::unexpected("Could not configure HTTP GET request");
     }
-    if (request.idle_timeout_seconds > 0 &&
-        (!setOption(CURLOPT_LOW_SPEED_LIMIT, 1L) || !setOption(CURLOPT_LOW_SPEED_TIME, request.idle_timeout_seconds))) {
+    if (request.idle_timeout_seconds > 0 && (!set_option(CURLOPT_LOW_SPEED_LIMIT, 1L) ||
+                                             !set_option(CURLOPT_LOW_SPEED_TIME, request.idle_timeout_seconds))) {
         return std::unexpected("Could not configure HTTP idle timeout");
     }
-    if (request.total_timeout_seconds > 0 && !setOption(CURLOPT_TIMEOUT, request.total_timeout_seconds)) {
+    if (request.total_timeout_seconds > 0 && !set_option(CURLOPT_TIMEOUT, request.total_timeout_seconds)) {
         return std::unexpected("Could not configure HTTP timeout");
     }
 

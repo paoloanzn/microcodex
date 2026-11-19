@@ -20,10 +20,11 @@ std::expected<std::string, std::string> messageText(const std::string_view item)
     if (!content) {
         return std::unexpected(content.error());
     }
-    if (!*content) {
+    const std::optional<std::string_view>& content_json = *content;
+    if (!content_json) {
         return std::unexpected("Response message has no content");
     }
-    auto parts = json::jsonArrayElements(**content);
+    auto parts = json::jsonArrayElements(*content_json);
     if (!parts) {
         return std::unexpected(parts.error());
     }

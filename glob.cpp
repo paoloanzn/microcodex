@@ -6,8 +6,8 @@
 // The POSIX header, not this project's "glob.h".
 #include <glob.h>  // NOLINT(readability-duplicate-include) IWYU pragma: keep
 
-#include <cstddef>
 #include <expected>
+#include <span>
 #include <string>
 
 namespace {
@@ -17,6 +17,8 @@ public:
     GlobResult() = default;
     GlobResult(const GlobResult&) = delete;
     GlobResult& operator=(const GlobResult&) = delete;
+    GlobResult(GlobResult&&) = delete;
+    GlobResult& operator=(GlobResult&&) = delete;
 
     ~GlobResult() { globfree(&value_); }
 
@@ -40,12 +42,12 @@ std::string globErrorMessage(const int error_code) {
 std::string joinMatches(const glob_t& matches) {
     std::string result;
 
-    for (std::size_t index = 0; index < matches.gl_pathc; ++index) {
+    for (const char* path : std::span<char*>(matches.gl_pathv, matches.gl_pathc)) {
         if (!result.empty()) {
             result += '\n';
         }
 
-        result += matches.gl_pathv[index];
+        result += path;
     }
 
     return result;
@@ -61,6 +63,8 @@ std::expected<std::string, std::string> glob(const std::string& pattern) {
     }
 
     GlobResult matches;
+    // POSIX has no reentrant glob, and concurrent tool calls only read the filesystem.
+    // NOLINTNEXTLINE(concurrency-mt-unsafe)
     const int error_code = ::glob(pattern.c_str(), 0, nullptr, matches.get());
 
     if (error_code != 0) {

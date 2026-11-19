@@ -6,6 +6,7 @@
 #include <charconv>
 #include <cstddef>
 #include <expected>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -42,9 +43,10 @@ std::expected<bool, std::string> ToolArguments::boolean(const std::string_view n
 std::expected<bool, std::string> ToolArguments::boolean(const std::string_view name, const bool default_value) const {
     auto value = json::findJsonMember(json_, name);
     if (!value) return std::unexpected(value.error());
-    if (!*value) return default_value;
-    if (**value == "true") return true;
-    if (**value == "false") return false;
+    const std::optional<std::string_view>& member = *value;
+    if (!member) return default_value;
+    if (*member == "true") return true;
+    if (*member == "false") return false;
     return std::unexpected("JSON member '" + std::string(name) + "' is not a boolean");
 }
 
@@ -52,14 +54,13 @@ std::expected<bool, std::string> ToolArguments::boolean(const std::string_view n
 
 namespace microcodex::detail {
 
-std::string toolJsonString(const std::string_view name, const std::string_view description,
-                           const std::string_view parameters) {
+std::string toolJsonString(const ToolJsonFields& fields) {
     std::string json = R"({"type":"function","name":)";
-    microcodex::json::appendString(json, name);
+    microcodex::json::appendString(json, fields.name);
     json += R"(,"description":)";
-    microcodex::json::appendString(json, description);
+    microcodex::json::appendString(json, fields.description);
     json += R"(,"strict":false,"parameters":)";
-    json += parameters;
+    json += fields.parameters;
     json += '}';
     return json;
 }
