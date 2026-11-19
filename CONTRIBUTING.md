@@ -32,12 +32,19 @@ The executable is written to `build/microcodex`.
 2. Keep changes focused and avoid unrelated refactoring.
 3. Follow the style of the surrounding code.
 4. Add or update tests when behavior changes.
-5. Build the project and run the test suite:
+5. Run the same checks as CI:
 
    ```sh
-   make
-   make test
+   make WERROR=1           # build with warnings as errors
+   make test               # run the test suite
+   make format             # apply .clang-format (CI checks with clang-format 18)
+   make lint               # run .clang-tidy with warnings as errors (clang-tidy 19 or newer)
+   shellcheck install.sh launcher.sh tests/*.sh
    ```
+
+   Run `make clean` before `make WERROR=1` so every source is compiled again. Different clang-format versions can format the same code differently, so if `make format` disagrees with CI, use version 18: `make format CLANG_FORMAT=clang-format-18`. `make lint` also writes `build/compile_commands.json`, which clangd reads (see `.clangd`).
+
+   To make `git blame` skip bulk formatting commits, run `git config blame.ignoreRevsFile .git-blame-ignore-revs` once.
 
 ## Pull requests
 
@@ -48,7 +55,7 @@ When opening a pull request:
 - Link any related issues.
 - Describe how the change was tested.
 - Keep each pull request limited to one logical change.
-- Ensure the project builds without warnings and all tests pass.
+- Ensure the project builds without warnings, passes `make lint` and `make format-check`, and all tests pass.
 
 > [!NOTE]
 > Please do not submit AI-generated pull request descriptions or diffs without reviewing them carefully. Contributors are responsible for understanding and validating everything they submit.
