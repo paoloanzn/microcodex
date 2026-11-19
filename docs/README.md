@@ -51,5 +51,3 @@ For changing MicroCodex. The build, lint and pull request rules are in
   test suite. Long paths and UUIDs are shortened with `…`.
 - Default values are the ones in the source at the time of writing. The source
   is authoritative when the two disagree.
-- Diagrams use [Mermaid](https://mermaid.js.org/), which GitHub renders
-  inline.
