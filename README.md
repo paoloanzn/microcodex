@@ -75,6 +75,14 @@ rejected with an error. The value is sent to the API as the request's
 > complete security boundary: commands that do not match the denylist and all
 > file operations run with the same permissions as the MicroCodex process.
 
+### Global instructions
+
+Instructions for every project go in `$CODEX_HOME/AGENTS.md`, or
+`~/.codex/AGENTS.md` when `CODEX_HOME` is unset, the same file Codex reads.
+`AGENTS.override.md` in the same directory takes its place when it exists.
+The file is read at startup and sent with every request; at most 32 KiB of it
+is used.
+
 ### Using Codex skills
 
 MicroCodex discovers the same filesystem skills installed for Codex under

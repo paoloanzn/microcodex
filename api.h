@@ -36,6 +36,10 @@ struct CodexApiConfig {
     std::string account_id;
     std::string model;
     std::string instructions;
+    // The global AGENTS.md text. When set, every sampling request starts its
+    // input with it as a user message. It is never added to the history or
+    // saved, so a resumed conversation always uses the current file.
+    std::string user_instructions;
     // User-facing thinking effort, one of reasoningEffortValues(). It is
     // sent as "reasoning": {"effort": ...}, except that "persistent" is sent
     // as "disabled" and "ultra" as "max".
@@ -167,12 +171,18 @@ private:
     static ToolExecutionResult executeToolCall(std::span<const std::shared_ptr<const ToolBase>> tools,
                                                const CodexToolCall& call, std::stop_token stop_token,
                                                std::size_t maximum_output_bytes);
+    // The input is leading_item, then items, then final_item; empty ones are skipped.
     std::expected<std::string, std::string> buildRequestBody(std::span<const std::string> items,
                                                              std::string_view instructions, bool include_tools,
+                                                             std::string_view leading_item,
                                                              std::string_view final_item = {}) const;
+    // The history's size estimate, including the user instructions message.
+    [[nodiscard]] std::size_t estimatedContextTokens() const;
     void emitEvent(const CodexEvent& event) const noexcept;
 
     CodexApiConfig config_;
+    // config_.user_instructions as a user message item, or empty.
+    std::string user_instructions_item_;
     ContextCompactor compactor_;
     CodexEventEmitter* events_ = nullptr;
     std::vector<std::string> input_items_;

@@ -81,3 +81,37 @@ expect_process "T2.9: --effort wins over MICROCODEX_EFFORT" 0 \
 Hello, world!
 STDOUT
 STDERR
+
+agents_home=$TEST_WORKDIR/agents-home
+write_test_credentials "$agents_home" || exit 1
+printf '\n  Answer tersely.\n\n' > "$agents_home/AGENTS.md" || exit 1
+
+expect_process "T2.11: the global AGENTS.md is sent before the prompt" 0 \
+    run_with_mock agents-md env CODEX_HOME="$agents_home" PATH="$TEST_BIN_DIR:$PATH" \
+        microcodex Follow the global instructions <<'STDOUT' 3<<'STDERR'
+Instructions received
+STDOUT
+STDERR
+
+set -- "$agents_home"/conversations/*.jsonl
+[ "$#" -eq 1 ] && [ -f "$1" ] || exit 1
+
+expect_process "T2.12: the global AGENTS.md is not saved with the conversation" 0 \
+    env CODEX_HOME="$agents_home" PATH="$TEST_BIN_DIR:$PATH" \
+        microcodex show "$(basename "$1" .jsonl)" <<'STDOUT' 3<<'STDERR'
+user: Follow the global instructions
+assistant: Instructions received
+STDOUT
+STDERR
+
+override_home=$TEST_WORKDIR/override-home
+write_test_credentials "$override_home" || exit 1
+printf 'Ignored global rule.\n' > "$override_home/AGENTS.md" || exit 1
+{ printf 'Override rule.\n' && head -c 39985 /dev/zero | tr '\0' x; } > "$override_home/AGENTS.override.md" || exit 1
+
+expect_process "T2.13: AGENTS.override.md wins and is cut at 32 KiB with a note" 0 \
+    run_with_mock agents-md-override env CODEX_HOME="$override_home" PATH="$TEST_BIN_DIR:$PATH" \
+        microcodex Follow the override <<'STDOUT' 3<<'STDERR'
+Instructions received
+STDOUT
+STDERR

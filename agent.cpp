@@ -169,6 +169,7 @@ CodexApiConfig makeCodingAgentConfig(std::string model) {
     config.model = std::move(model);
     config.instructions = std::string(codingAgentSystemPrompt());
     config.instructions += availableSkillsInstructions();
+    config.user_instructions = loadGlobalInstructions();
     config.tools = makeCodingTools();
     return config;
 }

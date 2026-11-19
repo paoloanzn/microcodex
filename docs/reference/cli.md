@@ -142,7 +142,7 @@ there was no file.
 
 | Variable | Default | Effect |
 |---|---|---|
-| `CODEX_HOME` | `~/.codex` | Directory for `auth.json`, `conversations/` and `skills/`. |
+| `CODEX_HOME` | `~/.codex` | Directory for `auth.json`, `AGENTS.md`, `conversations/` and `skills/`. |
 | `HOME` | | Used for `~/.codex` when `CODEX_HOME` is unset. If neither is set, every command that needs `auth.json` fails with `Cannot find OAuth credentials path: HOME is not set`. |
 | `MICROCODEX_EFFORT` | `medium` | Reasoning effort when `--effort` is absent. Same values as `--effort`. It is checked after the credentials are loaded, and an error starts with `MICROCODEX_EFFORT:` and has no usage text. |
 | `MICROCODEX_TOOL_EXECUTION_TIMEOUT_SECONDS` | `120` | Time limit for each tool call. `0` disables it. The maximum is 31536000 (one year). |
@@ -167,11 +167,13 @@ server you do not trust while you are logged in.
 ## Files
 
 All paths are relative to `CODEX_HOME`. MicroCodex uses the same layout as
-the Codex CLI, so the two share credentials and skills.
+the Codex CLI, so the two share credentials, global instructions and skills.
 
 | Path | Contents |
 |---|---|
 | `auth.json` | OAuth tokens, written atomically with mode `0600`: `{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{"id_token","access_token","refresh_token","account_id"},"last_refresh"}`. |
+| `AGENTS.md` | Instructions for every project, read at startup and sent as the first message of every request. At most 32 KiB is used; a longer file ends with a `<truncated>` note to the model. See [the global AGENTS.md](../concepts/turn-lifecycle.md#the-global-agentsmd). |
+| `AGENTS.override.md` | Used instead of `AGENTS.md` when it exists and is not blank. |
 | `conversations/` | One `<id>.jsonl` file per conversation. The directory has mode `0700` and each file `0600`. Format: [conversation files](conversation-files.md). |
 | `skills/` | Skills, read at startup. Every `SKILL.md` up to 6 directory levels deep whose YAML front matter has a `name` (at most 128 characters) and a `description` (at most 1024) is listed in the model's instructions with its absolute path. Files over 1 MiB are skipped. |
 

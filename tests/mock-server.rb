@@ -118,6 +118,26 @@ def validate_scenario!(scenario, request_number, payload)
            "--effort ultra was not resolved to the model wire top 'max'")
     assert(input_text(payload) == "Say hello with ultra effort",
            "CLI prompt arguments were not joined and sent")
+  when "agents-md"
+    validate_coding_tools!(payload)
+    input = payload.fetch("input")
+    assert(input.length == 2, "global AGENTS.md request did not have two input items")
+    assert(input[0]["role"] == "user", "global AGENTS.md was not sent as a user message")
+    assert(input_text(payload) ==
+             "# AGENTS.md instructions\n\n<INSTRUCTIONS>\nAnswer tersely.\n</INSTRUCTIONS>",
+           "global AGENTS.md was not trimmed and wrapped")
+    assert(input[1].dig("content", 0, "text") == "Follow the global instructions",
+           "the prompt did not follow the global AGENTS.md")
+  when "agents-md-override"
+    validate_coding_tools!(payload)
+    header = "# AGENTS.md instructions\n\n<INSTRUCTIONS>\n"
+    footer = "\n</INSTRUCTIONS>"
+    text = input_text(payload)
+    assert(text.start_with?("#{header}Override rule.\n"), "AGENTS.override.md was not preferred")
+    kept, note = text.delete_prefix(header).delete_suffix(footer).split("\n<truncated>", 2)
+    assert(kept.bytesize == 32 * 1024 && kept.end_with?("x"), "AGENTS.override.md was not cut at 32 KiB")
+    assert(%r{\AOnly the first 32768 of 40000 bytes of /\S+/AGENTS\.override\.md were loaded\.</truncated>\z}
+             .match?(note.to_s), "the cut AGENTS.override.md has no truncation note")
   when "http-error"
     validate_coding_tools!(payload)
   when "remote-503"
@@ -523,6 +543,8 @@ def response_for(scenario, request_number)
   when "effort-env" then [200, "OK", "text/event-stream", text_response]
   when "effort-persistent" then [200, "OK", "text/event-stream", text_response]
   when "effort-ultra" then [200, "OK", "text/event-stream", text_response]
+  when "agents-md", "agents-md-override"
+    [200, "OK", "text/event-stream", message_response("Instructions received")]
   when "paste" then [200, "OK", "text/event-stream", message_response("Paste received")]
   when "invisible-paste"
     [200, "OK", "text/event-stream", message_response("Invisible paste received")]

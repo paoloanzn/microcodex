@@ -58,6 +58,10 @@ struct TurnBoundary {
 };
 ```
 
+The only item a request sends that is not in `input_items_` is the
+[global AGENTS.md](turn-lifecycle.md#the-global-agentsmd) message, which comes
+first and is never saved.
+
 `input_items_` is a flat list. The turn boundaries are kept next to it rather
 than inside it: a turn is a slice of `input_items_`, and its boundary records
 where the slice ends. A turn starts where the previous one ends, or at the

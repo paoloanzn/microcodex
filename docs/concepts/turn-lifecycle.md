@@ -64,7 +64,7 @@ The body is built by `CodexApi::buildRequestBody()`:
 |---|---|
 | `model` | `CodexApiConfig::model`, for example `gpt-6-sol`. |
 | `instructions` | The system prompt plus the skills catalog. |
-| `input` | Every item in `input_items_`, in order. |
+| `input` | The [global AGENTS.md](#the-global-agentsmd) message when there is one, then every item in `input_items_`, in order. |
 | `tools`, `tool_choice`, `parallel_tool_calls` | The tool definitions, `"auto"` and `true`. |
 | `reasoning` | `{"effort": …}`. The value `persistent` is sent as `disabled`, and `ultra` as `max`. |
 | `store` | `false`: the server keeps nothing, so every request carries the full conversation. |
@@ -72,6 +72,46 @@ The body is built by `CodexApi::buildRequestBody()`:
 | `include` | `["reasoning.encrypted_content"]`, so reasoning items can be replayed. |
 | `prompt_cache_key` | The session ID, which is the conversation ID. |
 | `client_metadata` | Installation, session, thread and window IDs. The window ID is `<session>:<compaction generation>`. |
+
+### The global AGENTS.md
+
+At startup `makeCodingAgentConfig()` calls `loadGlobalInstructions()`
+(`skills.cpp`), which reads `$CODEX_HOME/AGENTS.override.md`, or
+`$CODEX_HOME/AGENTS.md` when the override is missing, unreadable or blank.
+A file that cannot be read is skipped without a message. The text is trimmed and stored in
+`CodexApiConfig::user_instructions`. Every sampling request then starts its
+`input` with it as a user message:
+
+```text
+# AGENTS.md instructions
+
+<INSTRUCTIONS>
+Answer tersely.
+</INSTRUCTIONS>
+```
+
+The message is built once, when `CodexApi` is created, and is never added to
+`input_items_`. As a result:
+
+- it is not saved in the conversation file, so `resume` and `show` never see
+  an old copy, and a resumed conversation uses the file as it is now;
+- compaction never summarizes or drops it;
+- summary requests do not include it.
+
+The context size that compaction compares against its threshold includes the
+message.
+
+Only the first 32 KiB of the file is used, cut at a character boundary.
+Nothing is printed when a file is cut. Instead, a note is appended inside the
+block, so the model knows that the rest exists and where to read it:
+
+```text
+…the last kept line
+<truncated>Only the first 32768 of 40000 bytes of /home/user/.codex/AGENTS.md were loaded.</truncated>
+</INSTRUCTIONS>
+```
+
+### The response
 
 The response is a server-sent event stream. The idle timeout
 (`idle_timeout_seconds`, 300) ends a stream whose average speed stays below
