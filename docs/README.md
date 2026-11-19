@@ -20,7 +20,7 @@ assumes.
 | [Conversation state](concepts/conversation-state.md) | Response items, the in-memory `input_items_` array with its turn boundaries, and how that state maps to the file on disk. |
 | [Context compaction](concepts/context-compaction.md) | When the context is summarized, which turns are kept word for word, and how the summary is saved without rewriting history. |
 | [Tools](concepts/tools.md) | `ToolBase` and the `Tool<>` adapter, parallel execution, output limits, timeouts and cancellation. |
-| [Terminal UI](concepts/terminal-ui.md) | The event queue between the agent and the UI, the main loop, and how transcript entries become terminal rows. |
+| [Terminal UI](concepts/terminal-ui.md) | The state-reducer model the UI is built on, the event queue between the agent and the UI, the main loop, and how transcript entries become terminal rows. |
 
 ## Reference
 

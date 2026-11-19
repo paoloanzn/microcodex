@@ -75,7 +75,7 @@ flowchart TB
 | Module | Owns |
 |---|---|
 | `main.cpp` | Argument parsing, the `login`, `logout`, `list` and `show` subcommands, and building a `CodexApiConfig` from flags, saved credentials, the model catalog and environment variables. |
-| `ui.cpp` | The interactive session: the composer, the transcript, key handling and drawing. See [terminal UI](terminal-ui.md). |
+| `ui.cpp` | The interactive session: the composer, the transcript, key handling and drawing, built as a state reducer. See [terminal UI](terminal-ui.md#state-events-and-a-reducer). |
 | `api.cpp`, `api.h` | `CodexApi`, the stateful conversation. It builds requests, parses the event stream, runs tools, decides when to compact, and saves turns. See [turn lifecycle](turn-lifecycle.md). |
 | `event-emitter.cpp` | `CodexEventEmitter`, the one-way channel from `CodexApi` to whoever displays the turn. |
 | `context-compaction.cpp` | `ContextCompactor`: the pure policy that decides what to summarize and builds the compacted context. See [context compaction](context-compaction.md). |
