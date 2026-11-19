@@ -108,5 +108,6 @@ The executable is written to `build/microcodex`. Run the test suite with `make t
 - [**CLI usage**](#using-microcodex-with-your-chatgpt-plan)
 - [**Installing & building**](#installing-and-running-microcodex)
 - [**Tests**](tests/TESTS.md)
+- [**Full documentation**](docs/README.md): architecture, data structures, file formats and the command-line reference
 
 This repository is licensed under the [Apache-2.0 License](LICENSE).
