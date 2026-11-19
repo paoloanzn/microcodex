@@ -75,3 +75,48 @@ STDOUT
 [tool bash] {"command":"sleep 30"}
 [tool bash failed] Error: Tool execution timed out after 2 seconds
 STDERR
+
+# Fails a case whose command outlives LIMIT seconds, so timing regressions show
+# up even when the output is correct.
+run_within() {
+    limit=$1
+    shift
+    started=$(date +%s)
+    "$@"
+    status=$?
+    elapsed=$(($(date +%s) - started))
+    if [ "$elapsed" -gt "$limit" ]; then
+        printf 'took %ss, limit %ss\n' "$elapsed" "$limit" >&2
+        return 97
+    fi
+    return "$status"
+}
+
+for fifo in 1 2 3 4; do
+    mkfifo "$TEST_PROJECT/fifo-$fifo" || exit 1
+done
+
+# Four reads that ignore their stop token time out together after 1s. They share
+# one 2s grace period, so the turn finishes in about 3s; a grace period per call
+# would take about 9s.
+expect_process "T3.8: stuck tools that ignore stop share one grace period" 0 \
+    run_within 6 run_with_mock tool-timeout-batch env MICROCODEX_TOOL_EXECUTION_TIMEOUT_SECONDS=1 \
+        CODEX_HOME="$tool_home" PATH="$TEST_BIN_DIR:$PATH" \
+        microcodex Read the blocked pipes <<'STDOUT' 3<<'STDERR'
+Blocked reads timed out
+STDOUT
+
+[tool read] {"path":"fifo-1","offset":0,"limit":16}
+
+[tool read] {"path":"fifo-2","offset":0,"limit":16}
+
+[tool read] {"path":"fifo-3","offset":0,"limit":16}
+
+[tool read] {"path":"fifo-4","offset":0,"limit":16}
+[tool read failed] Error: Tool execution timed out after 1 seconds
+[tool read failed] Error: Tool execution timed out after 1 seconds
+[tool read failed] Error: Tool execution timed out after 1 seconds
+[tool read failed] Error: Tool execution timed out after 1 seconds
+STDERR
+
+rm -f "$TEST_PROJECT"/fifo-[1-4]

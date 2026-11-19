@@ -786,6 +786,10 @@ namespace microcodex {
             // waiting a fresh `timeout` per task would let the turn take up to
             // N x timeout, so each task waits only until its own deadline.
             std::chrono::steady_clock::time_point start_time{};
+            // Set when the task is stopped for timing out. Overdue tasks are
+            // stopped together and share one grace period, so a batch of stuck
+            // tools cannot stack their grace periods either.
+            std::chrono::steady_clock::time_point grace_deadline{};
         };
         std::vector<ToolTask> tasks;
         tasks.reserve(calls.size());
@@ -835,13 +839,26 @@ namespace microcodex {
             // The deadline is anchored at the task's launch, not at the moment
             // this loop reaches it: otherwise parallel stuck tools would each
             // consume a full timeout and the turn could take N x timeout.
+            // A task already stopped for timing out counts as timed out even if
+            // it exited cooperatively, so it is not reported as interrupted.
             const bool timed_out = timeout.count() > 0 &&
-                                   tasks[index].future.wait_until(tasks[index].start_time + timeout) == std::future_status::timeout;
+                                   (tasks[index].grace_deadline != std::chrono::steady_clock::time_point{} ||
+                                    tasks[index].future.wait_until(tasks[index].start_time + timeout) == std::future_status::timeout);
             if (timed_out) {
-                // Ask the stuck tool to stop, then report the timeout without
-                // waiting for it: the turn must never wedge behind a hung tool
-                // call.
-                tasks[index].stop_source.request_stop();
+                // Ask every overdue tool to stop at once, then report the
+                // timeout without waiting for it: the turn must never wedge
+                // behind a hung tool call.
+                if (tasks[index].grace_deadline == std::chrono::steady_clock::time_point{}) {
+                    const auto now = std::chrono::steady_clock::now();
+                    for (std::size_t later = index; later < tasks.size(); ++later) {
+                        ToolTask &task = tasks[later];
+                        if (task.start_time + timeout <= now &&
+                            task.future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+                            task.stop_source.request_stop();
+                            task.grace_deadline = now + std::chrono::seconds(2);
+                        }
+                    }
+                }
                 result = {{calls[index].call_id,
                            "Error: Tool execution timed out after " + std::to_string(config_.tool_execution_timeout_seconds) + " seconds"},
                           {},
@@ -852,15 +869,15 @@ namespace microcodex {
                 // reaper thread: futures from std::async block in their
                 // destructor until the task finishes, so a still-running task
                 // must never be destroyed here.
-                if (tasks[index].future.wait_for(std::chrono::seconds(2)) == std::future_status::ready) {
+                if (tasks[index].future.wait_until(tasks[index].grace_deadline) == std::future_status::ready) {
                     try {
-                        tasks[index].future.get();
+                        static_cast<void>(tasks[index].future.get());
                     } catch (...) {
                     }
                 } else {
                     std::thread([future = std::move(tasks[index].future)]() mutable {
                         try {
-                            future.get();
+                            static_cast<void>(future.get());
                         } catch (...) {
                         }
                     }).detach();
