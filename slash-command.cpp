@@ -47,11 +47,13 @@ std::optional<CommandLine> parseCommandLine(const std::string_view input) {
 
 // 258400 -> "258,400".
 std::string groupDigits(const std::size_t value) {
-    std::string digits = std::to_string(value);
-    for (std::size_t position = digits.size(); position > 3; position -= 3) {
-        digits.insert(position - 3, ",");
+    const std::string digits = std::to_string(value);
+    std::string grouped;
+    for (std::size_t index = 0; index < digits.size(); ++index) {
+        if (index != 0 && (digits.size() - index) % 3 == 0) grouped += ',';
+        grouped += digits[index];
     }
-    return digits;
+    return grouped;
 }
 
 class EffortCommand final : public microcodex::SlashCommand {
