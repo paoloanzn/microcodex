@@ -42,7 +42,12 @@ CFLAGS   := -std=c17 -Wall -Wextra $(PLATFORM_FLAGS)
 LDFLAGS  := -pthread $(PLATFORM_FLAGS)
 LDLIBS   := -lcurl $(PLATFORM_LIBS)
 
+# The linked executable keeps its symbol table for debuggers and profilers.
+# build/microcodex, the binary that is tested and released, is a stripped copy
+# of it, about a fifth smaller.
 TARGET := build/microcodex
+UNSTRIPPED_TARGET := build/microcodex.unstripped
+STRIP ?= strip
 
 CPP_SOURCES := $(wildcard *.cpp)
 HEADERS     := $(wildcard *.h)
@@ -63,8 +68,11 @@ LINT_STAMPS  := $(patsubst %.cpp,build/lint/%.cpp.tidy,$(CPP_SOURCES))
 
 all: $(TARGET) $(COMPILE_DB)
 
-$(TARGET): $(OBJECTS)
+$(UNSTRIPPED_TARGET): $(OBJECTS)
 	$(CXX) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+$(TARGET): $(UNSTRIPPED_TARGET)
+	$(STRIP) -o $@ $<
 
 build/%.cpp.o: %.cpp
 	@mkdir -p $(dir $@)
