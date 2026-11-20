@@ -428,16 +428,16 @@ std::expected<std::optional<std::filesystem::path>, std::string> prepareResume(A
 
     auto path = conversationPath(*resume_id);
     if (!path) return std::unexpected(path.error());
-    auto metadata = microcodex::readConversationMetadata(*path);
-    if (!metadata) return std::unexpected(metadata.error());
-    if (!request.model_explicit) {
-        auto model = microcodex::readConversationModel(*path);
-        if (!model) return std::unexpected(model.error());
-        request.model = std::move(*model);
-    }
+    // resume() checks every record and reports the newest model record as
+    // the metadata's model.
+    auto file = microcodex::ConversationFile::openReadOnly(*path);
+    if (!file) return std::unexpected(file.error());
+    auto resumed = file->resume();
+    if (!resumed) return std::unexpected(resumed.error());
+    if (!request.model_explicit) request.model = std::move(resumed->metadata.model);
 
     std::error_code error;
-    std::filesystem::current_path(metadata->working_directory, error);
+    std::filesystem::current_path(resumed->metadata.working_directory, error);
     if (error) {
         return std::unexpected("Could not restore conversation working directory: " + error.message());
     }

@@ -57,9 +57,6 @@ struct CompactionCheckpoint {
 
 std::expected<std::filesystem::path, std::string> conversationDirectory();
 std::expected<ConversationMetadata, std::string> readConversationMetadata(const std::filesystem::path& path);
-// The model a resumed conversation continues with: the newest `model` record,
-// or the metadata's model when the model was never changed.
-std::expected<std::string, std::string> readConversationModel(const std::filesystem::path& path);
 std::expected<std::vector<ConversationSummary>, std::string> listConversations(const std::filesystem::path& directory);
 
 // ConversationFile is the sole durable representation of a conversation.
