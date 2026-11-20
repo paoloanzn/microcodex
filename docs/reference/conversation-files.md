@@ -103,12 +103,12 @@ when there is none. `list` still shows the metadata's `model`.
 
 `ConversationFile::resume()` checks every record and refuses a file that
 breaks a rule. `resume` and `show` then print an error and exit with status 1.
-In a one-shot `resume ID PROMPT` run the error is prefixed with
-`Agent failed: `.
+`resume` checks the file before it starts the agent, so the error has no
+`Agent failed: ` prefix, even in a one-shot `resume ID PROMPT` run.
 
 | Rule | Error |
 |---|---|
-| The file has at least one complete line. | `Conversation file is empty` from `show`. `resume` reads the metadata first and reports `Could not read conversation metadata from 'PATH'`. |
+| The file has at least one complete line. | `Conversation file is empty` |
 | The first record is a `conversation` record. | Usually `Missing JSON member 'version'`, because the metadata fields are read before the type is checked. A record with every metadata field but another `type` gives `Conversation file does not begin with metadata`. |
 | The version is 1. | `Unsupported conversation file version N` |
 | There is only one `conversation` record. | `Conversation contains more than one metadata record` |

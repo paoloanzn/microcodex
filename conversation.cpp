@@ -327,25 +327,6 @@ std::expected<ConversationMetadata, std::string> readConversationMetadata(const 
     return parseMetadata(first_line);
 }
 
-std::expected<std::string, std::string> readConversationModel(const std::filesystem::path& path) {
-    auto metadata = readConversationMetadata(path);
-    if (!metadata) return std::unexpected(metadata.error());
-    std::ifstream input(path, std::ios::binary);
-    std::string line;
-    std::getline(input, line);
-    std::string model = std::move(metadata->model);
-    // A last line without its newline is an interrupted write, which resume()
-    // removes, so it never counts. Other invalid records are left for
-    // resume() to report.
-    while (std::getline(input, line) && !input.eof()) {
-        auto type = json::requiredJsonString(line, "type");
-        if (!type || *type != "model") continue;
-        auto changed = parseModelRecord(line);
-        if (changed) model = std::move(*changed);
-    }
-    return model;
-}
-
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters): private constructor; every call site is in this file.
 ConversationFile::ConversationFile(std::filesystem::path path, const int descriptor, const std::uint64_t file_size)
     : path_(std::move(path)), descriptor_(descriptor), file_size_(file_size) {}
