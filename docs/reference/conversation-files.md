@@ -20,8 +20,8 @@ with mode `0600`. Creating a file never replaces an existing one.
 
 A file is a sequence of records. Each record is one JSON object on one line,
 followed by `\n`. A record, without its newline, is at most 16 MiB. The first
-record is always `conversation`. After it come `turn` and `checkpoint` records
-in the order they were written.
+record is always `conversation`. After it come `turn`, `checkpoint` and
+`model` records in the order they were written.
 
 This file has two turns and one compaction between them. It was produced by
 test T4.7, and the long path is shortened:
@@ -48,7 +48,7 @@ this line.
 | `id` | string | The conversation ID. It matches the file name. |
 | `created_at` | string | UTC time in the form `2026-11-19T13:35:23Z`. `list` sorts by this field. |
 | `working_directory` | string | Absolute path of the directory MicroCodex was started in. `resume` changes to it. |
-| `model` | string | Model of the first session. `resume` uses it unless `--model` is given. |
+| `model` | string | Model the conversation started with. `resume` uses it unless a [`model`](#model) record or `--model` says otherwise. |
 
 ### `turn`
 
@@ -81,6 +81,24 @@ Written by each [context compaction](../concepts/context-compaction.md).
 Only the last checkpoint in a file is used. Earlier ones stay as a record of
 previous compactions.
 
+### `model`
+
+Written when `/model` switches to another model, and when `resume --model`
+names a model other than the saved one. Nothing is written when the model
+stays the same.
+
+```json
+{"type":"model","model":"gpt-6.2-astra"}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `type` | string | `"model"`. |
+| `model` | string | Model of the turns that follow. Not empty. |
+
+`resume` uses the model of the last `model` record, or the metadata's `model`
+when there is none. `list` still shows the metadata's `model`.
+
 ## Rules
 
 `ConversationFile::resume()` checks every record and refuses a file that
@@ -97,6 +115,7 @@ In a one-shot `resume ID PROMPT` run the error is prefixed with
 | Turn numbers go 1, 2, 3, … with no gaps. | `Conversation turn numbers are not consecutive` |
 | Each checkpoint's generation is one more than the previous one, and its `through_turn` is the last turn written before it. | `Compaction checkpoints are inconsistent` |
 | `keep_from_turn` is between 1 and `through_turn + 1`. | `Compaction checkpoint has an invalid retained turn` |
+| A `model` record names a model. | `Model record has an empty model` |
 | Every turn has at least one item. | `Saved turn contains no response items` |
 | No record is larger than 16 MiB. | `Conversation record exceeds the size limit` |
 | Every `type` is known. | `Unknown conversation record type 'NAME'` |
@@ -114,7 +133,7 @@ same process then fails with `Conversation is not open for writing`. Resume
 the conversation from a new process to continue.
 
 Nothing ever rewrites or deletes earlier records. Compaction only adds a
-checkpoint.
+checkpoint, and `/model` only adds a `model` record.
 
 ## Damaged files
 

@@ -19,6 +19,7 @@
 #include "context-compaction.h"
 #include "conversation.h"
 #include "event-emitter.h"
+#include "model-catalog.h"
 #include "response-item.h"
 #include "tool.h"
 
@@ -65,6 +66,13 @@ struct CodexApiConfig {
         .retained_context_tokens = std::size_t{20} * 1024,
         .maximum_summary_bytes = std::size_t{32} * 1024,
     };
+    // The /models catalog read at startup. setModel() accepts only these
+    // models and takes their context limits from it. Empty when the catalog
+    // could not be read, which makes setModel() refuse every model.
+    std::vector<ModelContextLimits> models;
+    // MICROCODEX_COMPACT_AT_TOKENS. When set, it replaces the catalog's
+    // compaction threshold for every model, including after setModel().
+    std::optional<std::size_t> compact_at_tokens_override;
     bool persist_conversation = true;
     std::optional<std::filesystem::path> resume_conversation;
     std::vector<std::shared_ptr<const ToolBase>> tools;
@@ -81,6 +89,11 @@ struct CodexApiStatus {
     std::size_t context_limit_tokens = 0;
     // Zero when automatic compaction is off.
     std::size_t compact_at_tokens = 0;
+    // Whether the next turn compacts the context before its request, for
+    // example after switching to a model with a smaller context window.
+    bool compaction_pending = false;
+    // The models setModel() accepts, in catalog order.
+    std::vector<std::string> models;
 };
 
 struct CodexApiResponse {
@@ -125,10 +138,14 @@ public:
     // always owned and modified by a single thread.
     std::expected<void, std::string> resetConversation();
 
-    // Both are rejected while a turn is running, because the worker thread
+    // These are rejected while a turn is running, because the worker thread
     // reads the configuration and the context during a turn.
     std::expected<CodexApiStatus, std::string> status() const;
     std::expected<void, std::string> setReasoningEffort(std::string effort);
+    // Switches the following turns to a catalog model and applies its context
+    // limits. The change is saved in the conversation file, so a resumed
+    // conversation continues with it.
+    std::expected<void, std::string> setModel(std::string model);
 
     // Prevents future turns and interrupts one that is currently active.
     // CodexApi owns no worker thread, so the caller remains responsible for

@@ -149,7 +149,7 @@ flowchart LR
     t3 -. replayed .-> i3
 ```
 
-There are three record types:
+There are four record types:
 
 - **`conversation`**: the first line, holding the metadata (ID, creation
   time, working directory, model).
@@ -157,6 +157,8 @@ There are three record types:
   turn's items verbatim. A failed turn is never written.
 - **`checkpoint`**: written by each compaction, holding the summary and the
   number of the first turn it did not summarize (`keep_from_turn`).
+- **`model`**: written by each model change, holding the model of the turns
+  that follow. Resume uses the newest one.
 
 A turn record is written once, when its turn ends. The record holds exactly
 the slice `input_items_[turn_start, end)` of that turn, so the file and the

@@ -37,6 +37,13 @@ Before an online run, `main.cpp` replaces the first two with values from the
 override the catalog values. Setting `MICROCODEX_COMPACT_AT_TOKENS=0` turns
 automatic compaction off.
 
+`main.cpp` keeps the whole catalog in `CodexApiConfig::models`.
+`CodexApi::setModel()`, called by `/model`, replaces the first two values with
+the new model's and keeps the `MICROCODEX_COMPACT_AT_TOKENS` override. A
+context that is larger than the new threshold is compacted by the usual check
+before the next request, so switching to a smaller model needs no extra
+step.
+
 ## When compaction runs
 
 `ContextCompactor::needed()` compares the context size with the threshold,

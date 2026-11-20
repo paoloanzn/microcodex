@@ -149,6 +149,13 @@ std::expected<CompactionCheckpoint, std::string> parseCheckpoint(const std::stri
     };
 }
 
+std::expected<std::string, std::string> parseModelRecord(const std::string_view line) {
+    auto model = json::requiredJsonString(line, "model");
+    if (!model) return std::unexpected(model.error());
+    if (model->empty()) return std::unexpected("Model record has an empty model");
+    return model;
+}
+
 std::string metadataRecord(const ConversationMetadata& metadata) {
     std::string record = R"({"type":"conversation","version":)" + std::to_string(metadata.version) + ",\"id\":";
     json::appendJsonString(record, metadata.id);
@@ -172,6 +179,13 @@ std::string turnRecord(const std::uint64_t number, const std::string_view id,
         record += items[index];
     }
     record += "]}";
+    return record;
+}
+
+std::string modelRecord(const std::string_view model) {
+    std::string record = R"({"type":"model","model":)";
+    json::appendJsonString(record, model);
+    record += '}';
     return record;
 }
 
@@ -283,6 +297,12 @@ std::expected<std::optional<std::uint64_t>, std::string> scanRecord(ResumeScan& 
         if (!scanned) return std::unexpected(scanned.error());
         return std::optional<std::uint64_t>{};
     }
+    if (*type == "model") {
+        auto model = parseModelRecord(line);
+        if (!model) return std::unexpected(model.error());
+        scan.metadata->model = std::move(*model);
+        return std::optional<std::uint64_t>{};
+    }
     return std::unexpected("Unknown conversation record type '" + *type + "'");
 }
 
@@ -305,6 +325,25 @@ std::expected<ConversationMetadata, std::string> readConversationMetadata(const 
         return std::unexpected("Could not read conversation metadata from '" + path.string() + "'");
     }
     return parseMetadata(first_line);
+}
+
+std::expected<std::string, std::string> readConversationModel(const std::filesystem::path& path) {
+    auto metadata = readConversationMetadata(path);
+    if (!metadata) return std::unexpected(metadata.error());
+    std::ifstream input(path, std::ios::binary);
+    std::string line;
+    std::getline(input, line);
+    std::string model = std::move(metadata->model);
+    // A last line without its newline is an interrupted write, which resume()
+    // removes, so it never counts. Other invalid records are left for
+    // resume() to report.
+    while (std::getline(input, line) && !input.eof()) {
+        auto type = json::requiredJsonString(line, "type");
+        if (!type || *type != "model") continue;
+        auto changed = parseModelRecord(line);
+        if (changed) model = std::move(*changed);
+    }
+    return model;
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters): private constructor; every call site is in this file.
@@ -440,6 +479,13 @@ std::expected<void, std::string> ConversationFile::appendCheckpoint(const Compac
         return std::unexpected("Cannot save an invalid compaction checkpoint");
     }
     return appendRecord(checkpointRecord(checkpoint));
+}
+
+std::expected<void, std::string> ConversationFile::appendModel(const std::string_view model) {
+    if (model.empty()) {
+        return std::unexpected("Cannot save an empty model");
+    }
+    return appendRecord(modelRecord(model));
 }
 
 // An unterminated final line is a write interrupted by a crash. A writable

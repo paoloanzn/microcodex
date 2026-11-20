@@ -349,8 +349,15 @@ std::expected<void, std::string> applyToolTimeoutEnvironment(microcodex::CodexAp
 }
 
 std::expected<void, std::string> applyConversationEnvironment(microcodex::CodexApiConfig& config) {
-    auto compact_at = applySizeEnvironment("MICROCODEX_COMPACT_AT_TOKENS", config.compaction.compact_at_tokens);
-    if (!compact_at) return compact_at;
+    // Kept as an override too, so /model does not replace it with the new
+    // model's catalog threshold.
+    if (const char* text = std::getenv("MICROCODEX_COMPACT_AT_TOKENS"); text != nullptr && *text != '\0') {
+        std::size_t compact_at_tokens = 0;
+        auto compact_at = applySizeEnvironment("MICROCODEX_COMPACT_AT_TOKENS", compact_at_tokens);
+        if (!compact_at) return compact_at;
+        config.compaction.compact_at_tokens = compact_at_tokens;
+        config.compact_at_tokens_override = compact_at_tokens;
+    }
     auto retained =
         applySizeEnvironment("MICROCODEX_RETAINED_CONTEXT_TOKENS", config.compaction.retained_context_tokens);
     if (!retained) return retained;
@@ -372,7 +379,10 @@ std::expected<void, std::string> applyEffortEnvironment(microcodex::CodexApiConf
 std::expected<void, std::string> applyModelContextLimits(microcodex::CodexApiConfig& config) {
     auto models = microcodex::fetchModelContextLimits(config.endpoint, config.access_token, config.account_id);
     if (!models) return std::unexpected(models.error());
-    const microcodex::ModelContextLimits* model = microcodex::findModelContextLimits(*models, config.model);
+    // Kept even when it does not list the starting model, so /model can
+    // still switch to a model it does list.
+    config.models = std::move(*models);
+    const microcodex::ModelContextLimits* model = microcodex::findModelContextLimits(config.models, config.model);
     if (model == nullptr) return std::unexpected("Models API did not return metadata for '" + config.model + "'");
     config.compaction = microcodex::compactionConfigForModel(*model, config.compaction.retained_context_tokens,
                                                              config.compaction.maximum_summary_bytes);
@@ -410,8 +420,8 @@ std::optional<int> runCommand(const std::span<char* const> arguments, const std:
     return std::nullopt;
 }
 
-// For a resumed conversation, restore its model (unless --model was given)
-// and working directory, and return the path of its file.
+// For a resumed conversation, restore its newest model (unless --model was
+// given) and its working directory, and return the path of its file.
 std::expected<std::optional<std::filesystem::path>, std::string> prepareResume(AgentRequest& request) {
     const std::optional<std::string>& resume_id = request.resume_id;
     if (!resume_id) return std::optional<std::filesystem::path>{};
@@ -420,7 +430,11 @@ std::expected<std::optional<std::filesystem::path>, std::string> prepareResume(A
     if (!path) return std::unexpected(path.error());
     auto metadata = microcodex::readConversationMetadata(*path);
     if (!metadata) return std::unexpected(metadata.error());
-    if (!request.model_explicit) request.model = metadata->model;
+    if (!request.model_explicit) {
+        auto model = microcodex::readConversationModel(*path);
+        if (!model) return std::unexpected(model.error());
+        request.model = std::move(*model);
+    }
 
     std::error_code error;
     std::filesystem::current_path(metadata->working_directory, error);

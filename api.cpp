@@ -34,6 +34,7 @@
 #include "event-emitter.h"
 #include "http.h"
 #include "json.h"
+#include "model-catalog.h"
 #include "response-item.h"
 #include "tool.h"
 
@@ -708,6 +709,11 @@ std::expected<void, std::string> CodexApi::initializeConversation() {
         if (!file) return std::unexpected(file.error());
         auto resumed = file->resume();
         if (!resumed) return std::unexpected(resumed.error());
+        // Resuming with another model, through --model, is a model change too.
+        if (resumed->metadata.model != config_.model) {
+            auto saved = file->appendModel(config_.model);
+            if (!saved) return std::unexpected(saved.error());
+        }
 
         session_id_ = resumed->metadata.id;
         input_items_ = std::move(resumed->input_items);
@@ -936,13 +942,22 @@ std::expected<CodexApiStatus, std::string> CodexApi::status() const {
     if (turn_running_) {
         return std::unexpected("Cannot read the agent status while a turn is running");
     }
+    const ContextUsage usage{
+        .reported_input_tokens = reported_input_tokens_,
+        .estimated_tokens = estimatedContextTokens(),
+    };
+    std::vector<std::string> models;
+    models.reserve(config_.models.size());
+    for (const ModelContextLimits& model : config_.models) models.push_back(model.name);
     return CodexApiStatus{
         .model = config_.model,
         .reasoning_effort = config_.reasoning_effort,
         .saved_turns = conversation_file_ ? conversation_file_->turnCount() : 0,
-        .context_tokens = std::max(reported_input_tokens_, estimatedContextTokens()),
+        .context_tokens = std::max(usage.reported_input_tokens, usage.estimated_tokens),
         .context_limit_tokens = config_.compaction.context_limit_tokens,
         .compact_at_tokens = config_.compaction.compact_at_tokens,
+        .compaction_pending = compactor_.needed(usage),
+        .models = std::move(models),
     };
 }
 
@@ -954,6 +969,33 @@ std::expected<void, std::string> CodexApi::setReasoningEffort(std::string effort
         return std::unexpected("Cannot change the reasoning effort while a turn is running");
     }
     config_.reasoning_effort = std::move(effort);
+    return {};
+}
+
+std::expected<void, std::string> CodexApi::setModel(std::string model) {
+    const std::lock_guard lock(turn_mutex_);
+    if (turn_running_) {
+        return std::unexpected("Cannot change the model while a turn is running");
+    }
+    if (config_.models.empty()) {
+        return std::unexpected("Cannot change the model without the models catalog");
+    }
+    const ModelContextLimits* limits = findModelContextLimits(config_.models, model);
+    if (limits == nullptr) {
+        return std::unexpected("Model '" + model + "' is not in the models catalog");
+    }
+    // Save first, so a failed write leaves the model unchanged. Before the
+    // first turn there is no file yet, and it is created with the new model.
+    if (conversation_file_ && model != config_.model) {
+        auto saved = conversation_file_->appendModel(model);
+        if (!saved) return saved;
+    }
+    CompactionConfig compaction = compactionConfigForModel(*limits, config_.compaction.retained_context_tokens,
+                                                           config_.compaction.maximum_summary_bytes);
+    if (config_.compact_at_tokens_override) compaction.compact_at_tokens = *config_.compact_at_tokens_override;
+    config_.compaction = compaction;
+    compactor_ = ContextCompactor(compaction);
+    config_.model = std::move(model);
     return {};
 }
 

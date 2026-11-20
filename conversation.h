@@ -34,6 +34,7 @@ struct SavedTurn {
 };
 
 struct ResumedConversation {
+    // `model` is the newest model record's, or the metadata record's.
     ConversationMetadata metadata;
     std::vector<std::string> input_items;
     std::vector<TurnBoundary> completed_turns;
@@ -56,11 +57,15 @@ struct CompactionCheckpoint {
 
 std::expected<std::filesystem::path, std::string> conversationDirectory();
 std::expected<ConversationMetadata, std::string> readConversationMetadata(const std::filesystem::path& path);
+// The model a resumed conversation continues with: the newest `model` record,
+// or the metadata's model when the model was never changed.
+std::expected<std::string, std::string> readConversationModel(const std::filesystem::path& path);
 std::expected<std::vector<ConversationSummary>, std::string> listConversations(const std::filesystem::path& directory);
 
 // ConversationFile is the sole durable representation of a conversation.
-// It stores terminal turns (completed or explicitly interrupted) and
-// compaction checkpoints. Failed turns that are rolled back are not saved.
+// It stores terminal turns (completed or explicitly interrupted), compaction
+// checkpoints and model changes. Failed turns that are rolled back are not
+// saved.
 class ConversationFile {
 public:
     static std::expected<ConversationFile, std::string> create(const std::filesystem::path& directory,
@@ -82,6 +87,10 @@ public:
                                                 std::span<const std::string> items);
 
     std::expected<void, std::string> appendCheckpoint(const CompactionCheckpoint& checkpoint);
+
+    // Records that the following turns use `model`. resume() reports the
+    // newest one as the metadata's model.
+    std::expected<void, std::string> appendModel(std::string_view model);
 
     [[nodiscard]] std::expected<std::vector<SavedTurn>, std::string> readTurnsBefore(std::size_t cursor,
                                                                                      std::size_t maximum_bytes) const;
