@@ -78,8 +78,10 @@ microcodex [--model MODEL] [--effort EFFORT] resume ID [PROMPT]
 
 Continues a saved conversation. `ID` is the conversation ID printed by
 `list`, with or without the `.jsonl` suffix. MicroCodex changes to the
-conversation's saved working directory and uses its saved model unless
-`--model` is given. With `PROMPT` it runs one more turn; without it, it opens
+conversation's saved working directory and uses its newest saved model
+(the one last chosen with [`/model`](#slash-commands), or the one it started
+with) unless `--model` is given. A `--model` that differs from the saved model
+is saved too, so the next `resume` keeps it. With `PROMPT` it runs one more turn; without it, it opens
 the interactive UI with the recent history shown.
 
 A damaged last line, left by a crash during a write, is removed before the
@@ -89,7 +91,8 @@ new turn is saved. See
 ### `list`
 
 Prints one line per saved conversation, newest first, with four
-tab-separated fields: ID, creation time (UTC), model and working directory.
+tab-separated fields: ID, creation time (UTC), the model it started with and
+working directory.
 It needs no login. Files whose first line cannot be read are skipped.
 
 ```text
@@ -149,7 +152,7 @@ there was no file.
 | `HOME` | | Used for `~/.codex` when `CODEX_HOME` is unset. If neither is set, every command that needs `auth.json` fails with `Cannot find OAuth credentials path: HOME is not set`. |
 | `MICROCODEX_EFFORT` | `medium` | Reasoning effort when `--effort` is absent. Same values as `--effort`. It is checked after the credentials are loaded, and an error starts with `MICROCODEX_EFFORT:` and has no usage text. |
 | `MICROCODEX_TOOL_EXECUTION_TIMEOUT_SECONDS` | `120` | Time limit for each tool call. `0` disables it. The maximum is 31536000 (one year). |
-| `MICROCODEX_COMPACT_AT_TOKENS` | from the model catalog | Context size that triggers compaction. `0` disables automatic compaction. |
+| `MICROCODEX_COMPACT_AT_TOKENS` | from the model catalog | Context size that triggers compaction. `0` disables automatic compaction. It also applies after `/model`. |
 | `MICROCODEX_RETAINED_CONTEXT_TOKENS` | `20480` | Token budget for the recent turns kept word for word by compaction. |
 | `MICROCODEX_API_ENDPOINT` | `https://chatgpt.com/backend-api/codex/responses` | Responses endpoint. The model catalog is read from the same base URL, with `/responses` replaced by `/models?client_version=0.166.0`. The backend lists only the models that version supports, which includes the GPT-6.2 models; any other model prints `Warning: Models API did not return metadata for 'MODEL'. Using built-in context limits.` |
 | `SHELL` | `/bin/sh` | Shell used by the `bash` tool. See [built-in tools](built-in-tools.md#bash). |
@@ -220,6 +223,8 @@ command, so `/st` followed by Enter runs `/status`.
 
 | Command | During a turn | Action |
 |---|---|---|
+| `/model` | refused | Open a picker of the models in the model catalog, with the current one selected. |
+| `/model NAME` | refused | Use `NAME` for the following turns, with its context limits. The change is saved, so `resume` continues with it. |
 | `/effort` | refused | Open a picker of the effort values, with the current one selected. |
 | `/effort LEVEL` | refused | Set the effort for the following turns. `LEVEL` is one of the [effort values](#prompt-and-interactive-session). |
 | `/new` | refused | Start a new conversation, like Ctrl-R. |
@@ -235,6 +240,19 @@ or given unexpected arguments shows an error:
 ✗ '/new' is not available while a turn is running
 ✗ '/new' takes no arguments
 ✗ /effort: unsupported reasoning effort 'turbo' (expected one of: none, minimal, low, medium, high, xhigh, max, ultra, persistent)
+✗ /model: unsupported model 'turbo' (expected one of: gpt-6.2-sol, gpt-6.2-astra, gpt-6-sol)
+```
+
+`/model` lists the models the model catalog returned at startup. When the
+catalog could not be read, it shows
+`✗ /model: the model list is not available, because the models catalog could not be read at startup`.
+When the conversation is already larger than the new model's compaction
+threshold, the notice says so, and the context is
+[compacted](../concepts/context-compaction.md) before the next request:
+
+```text
+• Model set to gpt-6.2-astra
+  The context (250,112 tokens) is over this model's compaction limit, so it is compacted before the next request
 ```
 
 `/status` prints, for example:

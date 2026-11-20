@@ -243,7 +243,7 @@ already registered.
 
 `run()` reads the agent only through its `CommandSnapshot`: whether a turn is
 running and, when none is, a `CodexApiStatus` with the model, effort, saved
-turn count and context size. During a turn the agent's state belongs to the
+turn count, context size and the models of the model catalog. During a turn the agent's state belongs to the
 worker thread, so the snapshot has no status then. The status is a copy, not
 a reference into `CodexApi`.
 
@@ -287,7 +287,8 @@ A picker option runs its command line exactly as if the user had typed it, so
 a picker needs no callbacks and the command validates its argument in one
 place. `/effort` with no argument returns an `OpenPicker` whose options are
 `/effort none` to `/effort persistent`. Choosing one runs that command, which
-returns an `UpdateApi` that calls `CodexApi::setReasoningEffort()`.
+returns an `UpdateApi` that calls `CodexApi::setReasoningEffort()`. `/model`
+works the same way with the catalog's models and `CodexApi::setModel()`.
 
 `UpdateApi` is the one effect that carries code. The command only builds the
 function, and nothing runs until the UI calls it:

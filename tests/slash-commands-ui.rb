@@ -2,8 +2,8 @@
 # frozen_string_literal: true
 
 # Drives the slash commands through the real terminal UI. The mock server
-# checks each request's reasoning effort and input, which makes the effect of
-# every command observable without parsing rendered screen output.
+# checks each request's model, reasoning effort and input, which makes the
+# effect of every command observable without parsing rendered screen output.
 
 require "pty"
 require "timeout"
@@ -60,6 +60,9 @@ PTY.spawn(app) do |reader, writer, pid|
 
   sleep 0.5
   type.call("/effort low\r")
+  type.call("/model nope\r")  # Rejected: not in the models catalog.
+  type.call("/mod\r")         # Opens the model picker on the current "gpt-6.2-sol".
+  type.call("\x1b[B\r")       # Down to "gpt-6.2-astra", then choose it.
   type.call("/new\r")
   type.call("third\r")
   Timeout.timeout(10) { sleep 0.02 until File.exist?(request_file(mock_dir, 3)) }

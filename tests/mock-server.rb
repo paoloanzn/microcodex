@@ -172,21 +172,32 @@ def validate_scenario!(scenario, request_number, payload)
     input = payload.fetch("input")
     case request_number
     when 0
+      assert(payload["model"] == "gpt-6.2-sol", "the first slash-command turn did not use the default model")
       assert(payload.dig("reasoning", "effort") == "high",
              "/effort picker did not change the reasoning effort to high")
       assert(input.length == 1 && input_text(payload) == "/etc/hosts is fine",
              "slash commands were sent to the model, or an unknown /word was not sent as a message")
     when 1
+      assert(payload["model"] == "gpt-6.2-sol", "the second slash-command turn did not keep the default model")
       assert(payload.dig("reasoning", "effort") == "high",
              "second turn did not keep the selected reasoning effort")
       assert(input.length == 3 && input.last.dig("content", 0, "text") == "second",
              "/new reset the conversation while a turn was running")
     else
+      assert(payload["model"] == "gpt-6.2-astra", "/model picker did not change the model to gpt-6.2-astra")
       assert(payload.dig("reasoning", "effort") == "low",
              "/effort low did not change the reasoning effort")
       assert(input.length == 1 && input_text(payload) == "third",
              "/new did not start a new conversation")
     end
+  when "model-resume"
+    validate_coding_tools!(payload)
+    assert(payload["model"] == "gpt-6.2-astra", "resume did not use the model chosen with /model")
+    input = payload.fetch("input")
+    assert(input.any? { |item| item.dig("content", 0, "text") == "second" },
+           "resumed request did not replay the turns before the model change")
+    assert(input.last.dig("content", 0, "text") == "After the switch",
+           "resumed request did not append the new user message")
   when "tool-write"
     validate_coding_tools!(payload)
     if request_number.zero?
@@ -552,6 +563,7 @@ def response_for(scenario, request_number)
     [200, "OK", "text/event-stream", message_response("Edited paste received")]
   when "keybindings" then [200, "OK", "text/event-stream", message_response("Keys received")]
   when "slash-commands" then [200, "OK", "text/event-stream", message_response("Command test reply")]
+  when "model-resume" then [200, "OK", "text/event-stream", message_response("Resumed with the new model")]
   when "http-error"
     [429, "Too Many Requests", "application/json",
      JSON.generate(error: {message: "rate limited"})]

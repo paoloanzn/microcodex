@@ -88,6 +88,58 @@ public:
     }
 };
 
+class ModelCommand final : public microcodex::SlashCommand {
+public:
+    [[nodiscard]] std::string_view name() const override { return "model"; }
+    [[nodiscard]] std::string_view description() const override { return "Choose the model for the next turns"; }
+    [[nodiscard]] std::string_view argumentHint() const override { return "[name]"; }
+
+    [[nodiscard]] std::vector<CommandEffect> run(const std::string_view arguments,
+                                                 const CommandSnapshot& snapshot) const override {
+        if (!snapshot.agent) return {microcodex::ShowError{"The agent status is not available"}};
+        const microcodex::CodexApiStatus& agent = *snapshot.agent;
+        if (agent.models.empty()) {
+            return {
+                microcodex::ShowError{"/model: the model list is not available, because the models catalog "
+                                      "could not be read at startup"}};
+        }
+        if (arguments.empty()) {
+            microcodex::OpenPicker picker{.title = "Model", .options = {}, .selected = 0};
+            for (const std::string& model : agent.models) {
+                if (model == agent.model) picker.selected = picker.options.size();
+                picker.options.push_back({
+                    .label = model,
+                    .description = model == agent.model ? "current" : "",
+                    .command = "/model " + model,
+                });
+            }
+            return {std::move(picker)};
+        }
+        if (std::ranges::find(agent.models, arguments) == agent.models.end()) {
+            std::string list;
+            for (const std::string& model : agent.models) {
+                if (!list.empty()) list += ", ";
+                list += model;
+            }
+            return {microcodex::ShowError{"/model: unsupported model '" + std::string(arguments) +
+                                          "' (expected one of: " + list + ")"}};
+        }
+        return {microcodex::UpdateApi{
+            [model = std::string(arguments)](microcodex::CodexApi& api) -> std::expected<std::string, std::string> {
+                auto changed = api.setModel(model);
+                if (!changed) return std::unexpected(changed.error());
+                std::string text = "Model set to " + model;
+                auto status = api.status();
+                if (status && status->compaction_pending) {
+                    text += "\nThe context (" + groupDigits(status->context_tokens) +
+                            " tokens) is over this model's compaction limit, so it is compacted before the next "
+                            "request";
+                }
+                return text;
+            }}};
+    }
+};
+
 class NewCommand final : public microcodex::SlashCommand {
 public:
     [[nodiscard]] std::string_view name() const override { return "new"; }
@@ -180,6 +232,7 @@ std::vector<const SlashCommand*> SlashCommandRegistry::completions(const std::st
 std::expected<SlashCommandRegistry, std::string> makeBuiltinSlashCommands() {
     SlashCommandRegistry registry;
     for (std::shared_ptr<const SlashCommand> command : {
+             std::shared_ptr<const SlashCommand>(std::make_shared<ModelCommand>()),
              std::shared_ptr<const SlashCommand>(std::make_shared<EffortCommand>()),
              std::shared_ptr<const SlashCommand>(std::make_shared<NewCommand>()),
              std::shared_ptr<const SlashCommand>(std::make_shared<StatusCommand>()),
