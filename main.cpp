@@ -1,9 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Paolo Anzani
 // SPDX-License-Identifier: Apache-2.0
 
+#include <signal.h>  // NOLINT(modernize-deprecated-headers): POSIX declares sigwait here.
+
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <chrono>
+#include <csignal>
 #include <cstddef>
 #include <cstdlib>
 #include <expected>
@@ -16,6 +20,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 
 #include "agent.h"
@@ -284,6 +289,48 @@ int runLogout() {
     return 0;
 }
 
+// Turns SIGINT and SIGTERM during a headless turn into CodexApi::interrupt(),
+// so the turn stops its tools and their commands before MicroCodex exits,
+// instead of leaving them running. This is also how a parent agent stops a
+// sub-agent. A second signal exits at once. A signal ignored on entry, as in
+// a background job, is discarded by the kernel and stays ignored.
+class HeadlessInterrupts {
+public:
+    // Must run before any other thread starts, so every thread blocks the
+    // signals and only the watcher receives them.
+    explicit HeadlessInterrupts(microcodex::CodexApi& agent) {
+        sigemptyset(&signals_);
+        sigaddset(&signals_, SIGINT);
+        sigaddset(&signals_, SIGTERM);
+        pthread_sigmask(SIG_BLOCK, &signals_, nullptr);
+        watcher_ = std::thread([this, &agent] {
+            for (bool interrupted = false;; interrupted = true) {
+                int signal_number = 0;
+                if (sigwait(&signals_, &signal_number) != 0 || done_) return;
+                if (interrupted) std::_Exit(128 + signal_number);
+                agent.interrupt();
+            }
+        });
+    }
+
+    ~HeadlessInterrupts() {
+        done_ = true;
+        pthread_kill(watcher_.native_handle(), SIGINT);  // wakes sigwait(), which then sees done_
+        watcher_.join();
+        pthread_sigmask(SIG_UNBLOCK, &signals_, nullptr);
+    }
+
+    HeadlessInterrupts(const HeadlessInterrupts&) = delete;
+    HeadlessInterrupts& operator=(const HeadlessInterrupts&) = delete;
+    HeadlessInterrupts(HeadlessInterrupts&&) = delete;
+    HeadlessInterrupts& operator=(HeadlessInterrupts&&) = delete;
+
+private:
+    sigset_t signals_{};
+    std::atomic<bool> done_{false};
+    std::thread watcher_;
+};
+
 int runPrompt(microcodex::CodexApiConfig config, const std::string_view prompt) {
     bool received_text = false;
     microcodex::CodexEventEmitter events([&received_text](const microcodex::CodexEvent& event) {
@@ -304,18 +351,29 @@ int runPrompt(microcodex::CodexApiConfig config, const std::string_view prompt) 
     });
 
     microcodex::CodexApi agent(std::move(config), events);
-    auto response = agent.sendUserMessage(prompt);
+    microcodex::connectAgentTool(agent);
+    std::expected<microcodex::CodexApiResponse, std::string> response;
+    {
+        const HeadlessInterrupts interrupts(agent);
+        response = agent.sendUserMessage(prompt);
+    }
+    int status = 0;
     if (!response) {
         std::cerr << "Agent failed: " << response.error() << '\n';
-        return 1;
+        status = 1;
+    } else {
+        if (!received_text && !response->text.empty()) {
+            std::cout << response->text;
+        }
+        if (received_text || !response->text.empty()) {
+            std::cout << '\n';
+        }
     }
-    if (!received_text && !response->text.empty()) {
-        std::cout << response->text;
+    // A sub-agent's parent reads the ID from this last line of stderr.
+    if (const std::optional<std::string> id = agent.conversationId(); id && microcodex::isSubAgent()) {
+        std::cerr << "[conversation " << *id << "]\n";
     }
-    if (received_text || !response->text.empty()) {
-        std::cout << '\n';
-    }
-    return 0;
+    return status;
 }
 
 std::expected<void, std::string> applySizeEnvironment(const char* name, std::size_t& destination) {

@@ -3,11 +3,22 @@
 
 #include "agent.h"
 
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+
+#include <cstdint>
+#endif
+
+#include <algorithm>
+#include <chrono>
 #include <cstddef>
+#include <cstdlib>
 #include <expected>
 #include <memory>
+#include <optional>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -123,12 +134,121 @@ std::expected<microcodex::ToolResult, std::string> executeBash(
     return microcodex::ToolResult{.output = std::move(output), .edit = {}};
 }
 
+// Set in the environment of every sub-agent the agent tool starts.
+constexpr std::string_view sub_agent_variable = "MICROCODEX_SUB_AGENT";
+// How much of a failed sub-agent's stderr its result keeps, from the end.
+constexpr std::size_t agent_error_tail_bytes = 4096;
+constexpr std::string_view conversation_line_prefix = "[conversation ";
+
+// The session whose model and effort new sub-agents start on. A process runs
+// one CodexApi, connected before its first turn starts any tool thread.
+const microcodex::CodexApi* parent_session = nullptr;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+
+// The running executable, so a sub-agent is the same build as its parent and
+// skips the installed launcher.
+std::expected<std::string, std::string> executablePath() {
+#ifdef __APPLE__
+    std::uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::string path(size, '\0');
+    if (_NSGetExecutablePath(path.data(), &size) != 0) {
+        return std::unexpected("Could not find the MicroCodex executable");
+    }
+    path.resize(path.find('\0'));
+    return path;
+#else
+    return "/proc/self/exe";
+#endif
+}
+
+// The command that starts a sub-agent for an agent tool call, or resumes one.
+std::expected<std::vector<std::string>, std::string> agentCommand(const ToolArguments& arguments) {
+    auto task = arguments.string("task");
+    auto agent_id = arguments.optionalString("agent_id");
+    auto model = arguments.optionalString("model");
+    auto effort = arguments.optionalString("effort");
+    if (!task) return std::unexpected(task.error());
+    if (!agent_id) return std::unexpected(agent_id.error());
+    if (!model) return std::unexpected(model.error());
+    if (!effort) return std::unexpected(effort.error());
+    if (task->empty()) return std::unexpected("task must not be empty");
+    if (!effort->empty()) {
+        auto valid = microcodex::validateReasoningEffort(*effort, "effort");
+        if (!valid) return std::unexpected(valid.error());
+    }
+    // A new sub-agent starts on the parent's model; a follow-up keeps its
+    // own unless the call names one.
+    if (parent_session != nullptr) {
+        if (model->empty() && agent_id->empty()) *model = parent_session->model();
+        if (effort->empty()) *effort = parent_session->reasoningEffort();
+    }
+    auto executable = executablePath();
+    if (!executable) return std::unexpected(executable.error());
+
+    std::vector<std::string> command{std::move(*executable)};
+    for (auto [flag, value] :
+         {std::pair{"--model", &*model}, std::pair{"--effort", &*effort}, std::pair{"resume", &*agent_id}}) {
+        if (value->empty()) continue;
+        command.emplace_back(flag);
+        command.push_back(std::move(*value));
+    }
+    command.push_back(std::move(*task));
+    return command;
+}
+
+// Removes the "[conversation ID]" line a sub-agent ends its stderr with and
+// returns the ID, or nothing when the sub-agent ended before saving one.
+std::optional<std::string> takeConversationId(std::string& stderr_text) {
+    const std::size_t start = stderr_text.rfind(conversation_line_prefix);
+    if (start == std::string::npos || (start > 0 && stderr_text[start - 1] != '\n') || !stderr_text.ends_with("]\n")) {
+        return std::nullopt;
+    }
+    const std::size_t id_start = start + conversation_line_prefix.size();
+    std::string id = stderr_text.substr(id_start, stderr_text.size() - 2 - id_start);
+    stderr_text.resize(start);
+    return id;
+}
+
+std::expected<microcodex::ToolResult, std::string> executeAgent(
+    std::expected<microcodex::BashCommandResult, std::string> (*callable)(const std::vector<std::string>&, std::string,
+                                                                          std::stop_token),
+    const ToolArguments& arguments, const std::stop_token stop_token) {
+    auto command = agentCommand(arguments);
+    if (!command) return std::unexpected(command.error());
+    auto result = callable(*command, std::string(sub_agent_variable) + "=1", stop_token);
+    if (!result) return std::unexpected(result.error());
+
+    std::string answer = std::move(result->stdout);
+    if (answer.ends_with('\n')) answer.pop_back();
+    const std::optional<std::string> id = takeConversationId(result->stderr);
+
+    std::string output = R"({"agent_id":)";
+    if (id) {
+        microcodex::json::appendString(output, *id);
+    } else {
+        output += "null";
+    }
+    output += R"(,"answer":)";
+    microcodex::json::appendString(output, answer);
+    output += R"(,"exit_code":)" + std::to_string(result->error_code);
+    if (result->error_code != 0) {
+        const std::string_view errors(result->stderr);
+        output += R"(,"error":)";
+        microcodex::json::appendString(output,
+                                       errors.substr(errors.size() - std::min(errors.size(), agent_error_tail_bytes)));
+    }
+    output += '}';
+    return microcodex::ToolResult{.output = std::move(output), .edit = {}};
+}
+
 using ReadTool =
     microcodex::Tool<std::expected<std::string, std::string>, const std::string&, std::size_t, std::size_t>;
 using WriteTool = microcodex::Tool<std::expected<int, std::string>, const std::string&, std::string_view>;
 using EditTool = microcodex::Tool<std::expected<microcodex::EditResult, std::string>, const std::string&,
                                   std::string_view, std::string_view, bool>;
 using GlobTool = microcodex::Tool<std::expected<std::string, std::string>, const std::string&>;
+using AgentTool = microcodex::Tool<std::expected<microcodex::BashCommandResult, std::string>,
+                                   const std::vector<std::string>&, std::string, std::stop_token>;
 using BashTool =
     microcodex::Tool<std::expected<microcodex::BashCommandResult, std::string>, const std::string&, std::stop_token>;
 
@@ -161,7 +281,30 @@ std::vector<std::shared_ptr<const ToolBase>> makeCodingTools() {
         static_cast<std::expected<BashCommandResult, std::string> (*)(const std::string&, std::stop_token)>(bash),
         R"({"type":"object","properties":{"command":{"type":"string"}},"required":["command"],"additionalProperties":false})",
         executeBash));
+    // A sub-agent gets no agent tool, so sub-agents never nest.
+    if (!isSubAgent()) {
+        tools.emplace_back(std::make_shared<AgentTool>(
+            "agent",
+            "Start a sub-agent: a separate MicroCodex session with your tools and working directory. It works on the "
+            "task on its own and returns its final answer and an agent_id. Only use it when the user explicitly asks "
+            "for sub-agents, delegation or parallel agents. Several agent calls in one response run in parallel, so "
+            "never give two of them the same files to edit. Pass agent_id to send a sub-agent a follow-up with its "
+            "conversation kept.",
+            runProgram,
+            R"({"type":"object","properties":{"task":{"type":"string","description":"Everything the sub-agent needs to know: it sees none of this conversation."},"agent_id":{"type":"string","description":"The agent_id of an earlier result, to send that sub-agent a follow-up."},"model":{"type":"string","description":"Defaults to your model; a follow-up keeps the sub-agent's model."},"effort":{"type":"string","description":"Reasoning effort, one of the --effort values. Defaults to yours."}},"required":["task"],"additionalProperties":false})",
+            executeAgent,
+            // A sub-agent runs a whole turn with its own tool timeouts, so
+            // only an interruption stops it.
+            std::chrono::seconds(0)));
+    }
     return tools;
+}
+
+void connectAgentTool(const CodexApi& api) { parent_session = &api; }
+
+bool isSubAgent() {
+    const char* value = std::getenv(std::string(sub_agent_variable).c_str());
+    return value != nullptr && *value != '\0' && std::string_view(value) != "0";
 }
 
 CodexApiConfig makeCodingAgentConfig(std::string model) {

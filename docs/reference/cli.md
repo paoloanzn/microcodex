@@ -35,7 +35,11 @@ microcodex [--model MODEL] [--effort EFFORT] [PROMPT]
 
 With `PROMPT`, MicroCodex runs one turn, prints the answer to stdout and
 exits. Tool activity goes to stderr (see
-[turn lifecycle](../concepts/turn-lifecycle.md#events)). All remaining words
+[turn lifecycle](../concepts/turn-lifecycle.md#events)). `SIGINT` (Ctrl-C) or
+`SIGTERM` interrupts the turn: running tools are stopped, together with the
+commands they started, and MicroCodex exits with status 1. A second signal
+ends it at once. A signal that was ignored when MicroCodex started, as
+`SIGINT` is for a background job, stays ignored. All remaining words
 are joined with spaces into one prompt, so quoting is optional.
 
 Without `PROMPT`, it starts the interactive UI. Both forms start a new saved
@@ -58,8 +62,10 @@ on the way:
 | `ultra` | `max` |
 | `persistent` | `disabled` |
 
-In Codex, `ultra` also runs sub-agents. MicroCodex has no sub-agents, so
-`ultra` is the same as `max`, the highest effort every GPT-6 model accepts.
+`ultra` is the same as `max`, the highest effort every GPT-6 model accepts,
+and does not start sub-agents by itself. Sub-agents work at every effort, but
+only when the user asks for them (see the
+[`agent` tool](built-in-tools.md#agent)).
 
 An empty or unknown value is an error, reported before any network request:
 
@@ -151,10 +157,11 @@ there was no file.
 | `CODEX_HOME` | `~/.codex` | Directory for `auth.json`, `AGENTS.md`, `conversations/` and `skills/`. |
 | `HOME` | | Used for `~/.codex` when `CODEX_HOME` is unset. If neither is set, every command that needs `auth.json` fails with `Cannot find OAuth credentials path: HOME is not set`. |
 | `MICROCODEX_EFFORT` | `medium` | Reasoning effort when `--effort` is absent. Same values as `--effort`. It is checked after the credentials are loaded, and an error starts with `MICROCODEX_EFFORT:` and has no usage text. |
-| `MICROCODEX_TOOL_EXECUTION_TIMEOUT_SECONDS` | `120` | Time limit for each call of a tool that has no limit of its own (see [timeouts](../concepts/tools.md#timeouts)); none of the built-in tools has one. `0` disables it. The maximum is 31536000 (one year). |
+| `MICROCODEX_TOOL_EXECUTION_TIMEOUT_SECONDS` | `120` | Time limit for each call of a tool that has no limit of its own (see [timeouts](../concepts/tools.md#timeouts)); of the built-in tools, only `agent` has one. `0` disables it. The maximum is 31536000 (one year). |
 | `MICROCODEX_COMPACT_AT_TOKENS` | from the model catalog | Context size that triggers compaction. `0` disables automatic compaction. It also applies after `/model`. |
 | `MICROCODEX_RETAINED_CONTEXT_TOKENS` | `20480` | Token budget for the recent turns kept word for word by compaction. |
 | `MICROCODEX_API_ENDPOINT` | `https://chatgpt.com/backend-api/codex/responses` | Responses endpoint. The model catalog is read from the same base URL, with `/responses` replaced by `/models?client_version=0.166.0`. The backend lists only the models that version supports, which includes the GPT-6.2 models; any other model prints `Warning: Models API did not return metadata for 'MODEL'. Using built-in context limits.` |
+| `MICROCODEX_SUB_AGENT` | unset | Set to `1` by the `agent` tool for the sub-agents it starts. When it is set to anything but `0`, the `agent` tool is left out, so sub-agents never nest, and a run with `PROMPT` ends its stderr with `[conversation ID]`. Not meant to be set by hand. |
 | `SHELL` | `/bin/sh` | Shell used by the `bash` tool. See [built-in tools](built-in-tools.md#bash). |
 
 The numeric variables must be unsigned integers; an empty value counts as

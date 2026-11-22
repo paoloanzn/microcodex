@@ -69,8 +69,93 @@ def input_text(payload)
   payload.dig("input", 0, "content", 0, "text")
 end
 
+# Requests 0, 2 and 4 come from the parent, 1 and 3 from its sub-agent: first
+# a new one, then the same one resumed for a follow-up.
+SUB_AGENT_STATE = {}
+
+def tool_names(payload)
+  payload.fetch("tools").map { |tool| tool["name"] }
+end
+
+def last_user_text(payload)
+  payload.fetch("input").select { |item| item["type"] == "message" && item["role"] == "user" }
+         .last&.dig("content", 0, "text")
+end
+
+def sub_agent_output(payload)
+  output = payload.fetch("input").select { |item| item["type"] == "function_call_output" }.last
+  JSON.parse(output.fetch("output"))
+end
+
+def validate_sub_agent!(request_number, payload)
+  validate_coding_tools!(payload)
+  # The parent runs with --model gpt-6.2-astra --effort low, which are not the defaults.
+  assert(payload["model"] == "gpt-6.2-astra", "sub-agent request #{request_number} did not use the parent's model")
+  case request_number
+  when 0
+    assert(tool_names(payload).include?("agent"), "parent request did not advertise the agent tool")
+    assert(input_text(payload) == "Ask a sub-agent for the answer", "parent did not receive the prompt")
+    assert(payload.dig("reasoning", "effort") == "low", "parent did not use its --effort")
+  when 1
+    assert(!tool_names(payload).include?("agent"), "sub-agent was offered the agent tool")
+    assert(input_text(payload) == "Find the answer", "sub-agent did not receive its task")
+    assert(payload.dig("reasoning", "effort") == "low", "sub-agent did not default to the parent's effort")
+  when 2
+    result = sub_agent_output(payload)
+    assert(result["agent_id"].is_a?(String) && result["agent_id"].match?(/\A[0-9a-f-]{36}\z/),
+           "sub-agent result did not carry its conversation ID")
+    assert(result["answer"] == "The answer is 42" && result["exit_code"].zero?,
+           "sub-agent result did not carry its answer")
+    SUB_AGENT_STATE[:agent_id] = result["agent_id"]
+  when 3
+    assert(!tool_names(payload).include?("agent"), "resumed sub-agent was offered the agent tool")
+    assert(input_text(payload) == "Find the answer", "resumed sub-agent lost its conversation")
+    assert(last_user_text(payload) == "Double it", "resumed sub-agent did not receive the follow-up")
+    assert(payload.dig("reasoning", "effort") == "high", "follow-up effort was not passed to the sub-agent")
+  when 4
+    result = sub_agent_output(payload)
+    assert(result == {"agent_id" => SUB_AGENT_STATE[:agent_id], "answer" => "Doubled: 84", "exit_code" => 0},
+           "follow-up result did not come from the same sub-agent")
+  end
+end
+
+def sub_agent_call_response(arguments)
+  sse(
+    {type: "response.output_item.done",
+     item: {type: "function_call", call_id: "call_agent", name: "agent",
+            arguments: JSON.generate(arguments)}},
+    completed
+  )
+end
+
+def sub_agent_response(request_number)
+  case request_number
+  when 0 then sub_agent_call_response(task: "Find the answer")
+  when 1 then message_response("The answer is 42")
+  when 2 then sub_agent_call_response(agent_id: SUB_AGENT_STATE.fetch(:agent_id), task: "Double it", effort: "high")
+  when 3 then message_response("Doubled: 84")
+  else message_response("The sub-agent says 84")
+  end
+end
+
+# The command records its shell's PID and runs long enough to be interrupted.
+def long_command_call_response
+  sse(
+    {type: "response.output_item.done",
+     item: {type: "function_call", call_id: "call_long", name: "bash",
+            arguments: JSON.generate(command: "printf '%s' \"$$\" > command.pid; sleep 30")}},
+    completed
+  )
+end
+
 def validate_scenario!(scenario, request_number, payload)
   case scenario
+  when "sub-agent"
+    validate_sub_agent!(request_number, payload)
+  when "sub-agent-interrupt"
+    validate_coding_tools!(payload)
+    assert(tool_names(payload).include?("agent") == request_number.zero?,
+           "only the parent request should advertise the agent tool")
   when "text"
     validate_coding_tools!(payload)
     assert(payload.dig("reasoning", "effort") == "medium",
@@ -573,6 +658,10 @@ end
 
 def response_for(scenario, request_number)
   case scenario
+  when "sub-agent" then [200, "OK", "text/event-stream", sub_agent_response(request_number)]
+  when "sub-agent-interrupt"
+    body = request_number.zero? ? sub_agent_call_response(task: "Run a long command") : long_command_call_response
+    [200, "OK", "text/event-stream", body]
   when "text" then [200, "OK", "text/event-stream", text_response]
   when "effort" then [200, "OK", "text/event-stream", text_response]
   when "effort-env" then [200, "OK", "text/event-stream", text_response]
@@ -742,8 +831,12 @@ expected_requests = if scenario == "context-error-retry"
                       1
                     elsif scenario == "slash-commands"
                       3
+                    elsif scenario == "sub-agent"
+                      5
                     elsif scenario == "tool-round-limit"
                       TOOL_ROUND_LIMIT + 2
+                    elsif scenario == "sub-agent-interrupt"
+                      2
                     elsif %w[tool-write tool-edit tool-shell-env tool-bash-denied tool-timeout tool-timeout-batch tool-finish-order compaction-resume incomplete-output interrupt-output interrupt-tool].include?(scenario)
                       2
                     else
@@ -762,7 +855,8 @@ while request_number < expected_requests
       request_line, headers, body, payload = read_request(socket)
       FileUtils.mkdir_p(request_directory)
       if request_line.start_with?("GET ")
-        assert(!models_requested, "models endpoint was queried more than once")
+        # Every MicroCodex process queries it once, and a sub-agent is another process.
+        assert(!models_requested || scenario.start_with?("sub-agent"), "models endpoint was queried more than once")
         validate_models_request!(request_line, headers)
         models_requested = true
         File.binwrite(File.join(request_directory, "models-request.txt"),

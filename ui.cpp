@@ -26,6 +26,7 @@
 #include <variant>
 #include <vector>
 
+#include "agent.h"
 #include "api.h"
 #include "conversation.h"
 #include "edit.h"
@@ -1906,6 +1907,7 @@ std::expected<void, std::string> runInteractive(CodexApiConfig config, const Sla
     state.active_model = config.model;
     state.active_effort = config.reasoning_effort;
     CodexApi api(std::move(config), emitter);
+    connectAgentTool(api);
     TurnFuture turn;
 
     auto history = loadSavedHistory(state, api);

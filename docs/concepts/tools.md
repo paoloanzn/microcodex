@@ -4,7 +4,7 @@ A **tool** is a local function the model can call: it sends a
 `function_call` item with a name and JSON arguments, MicroCodex runs the
 function, and the result goes back as a `function_call_output` item. This
 page explains the tool interface in `tool.h` and how `CodexApi` runs calls.
-The five built-in tools are described in
+The six built-in tools are described in
 [built-in tools](../reference/built-in-tools.md). Adding a new one is walked
 through in [adding a tool](../development/adding-a-tool.md).
 
@@ -83,6 +83,7 @@ std::expected<microcodex::ToolResult, std::string> executeGlob(
 ```
 
 `ToolArguments` reads top-level members of a flat object: `string(name)`,
+`optionalString(name)`, which is empty when the member is absent,
 `size(name)` for non-negative integers, `boolean(name)`, and
 `boolean(name, default)` for an optional flag. A missing or mistyped member
 is an error with a message the model can act on, such as
@@ -169,8 +170,9 @@ value, and `0` means no limit, so only an interruption stops the call. Every
 other tool, and an unknown tool name, uses `tool_execution_timeout_seconds`
 (120 by default, `0` disables it). A tool's own value always wins over the
 session's, so a long-running tool keeps its limit whatever
-`MICROCODEX_TOOL_EXECUTION_TIMEOUT_SECONDS` is set to. None of the built-in
-tools sets its own limit.
+`MICROCODEX_TOOL_EXECUTION_TIMEOUT_SECONDS` is set to. Of the built-in tools,
+only `agent` sets its own limit: `0`, because a sub-agent runs a whole turn
+with its own tool limits.
 
 The deadline counts from the call's own start, not from the moment the
 collector notices it. If it counted from the collector, five stuck calls would

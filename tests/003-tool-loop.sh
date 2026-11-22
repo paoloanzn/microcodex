@@ -136,3 +136,26 @@ STDOUT
 [tool bash completed] {"stdout":"fast","stderr":"","exit_code":0}
 [tool bash completed] {"stdout":"slow","stderr":"","exit_code":0}
 STDERR
+
+agent_home=$TEST_WORKDIR/agent-home
+write_test_credentials "$agent_home" || exit 1
+
+# The sub-agent is MicroCodex itself, started by the agent tool, so the mock
+# server sees the parent and the sub-agent take turns. Conversation IDs are
+# random, so stderr shows each one as ID.
+# shellcheck disable=SC2016 # The inner sh -c expands its own arguments.
+expect_process "T3.10: the agent tool starts a sub-agent and sends it a follow-up" 0 \
+    run_with_mock sub-agent sh -c 'CODEX_HOME="$1" PATH="$2:$PATH" \
+        microcodex --model gpt-6.2-astra --effort low Ask a sub-agent for the answer \
+        2>"$1/parent.err"; status=$?
+        sed "s/[0-9a-f]\{8\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{12\}/ID/g" "$1/parent.err" >&2
+        exit "$status"' sh "$agent_home" "$TEST_BIN_DIR" <<'STDOUT' 3<<'STDERR'
+The sub-agent says 84
+STDOUT
+
+[tool agent] {"task":"Find the answer"}
+[tool agent completed] {"agent_id":"ID","answer":"The answer is 42","exit_code":0}
+
+[tool agent] {"agent_id":"ID","task":"Double it","effort":"high"}
+[tool agent completed] {"agent_id":"ID","answer":"Doubled: 84","exit_code":0}
+STDERR
