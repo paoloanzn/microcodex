@@ -33,6 +33,8 @@ public:
     explicit ToolArguments(std::string_view json) : json_(json) {}
 
     [[nodiscard]] std::expected<std::string, std::string> string(std::string_view name) const;
+    // An empty string when the member is absent.
+    [[nodiscard]] std::expected<std::string, std::string> optionalString(std::string_view name) const;
     [[nodiscard]] std::expected<std::size_t, std::string> size(std::string_view name) const;
     [[nodiscard]] std::expected<bool, std::string> boolean(std::string_view name) const;
     [[nodiscard]] std::expected<bool, std::string> boolean(std::string_view name, bool default_value) const;

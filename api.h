@@ -155,6 +155,15 @@ public:
 
     [[nodiscard]] bool turnInProgress() const noexcept;
 
+    // The ID that resumes this conversation, or nothing until
+    // initializeConversation() has saved it.
+    [[nodiscard]] std::optional<std::string> conversationId() const;
+
+    // The model and reasoning effort of the next request. Unlike status(),
+    // these can be read during a turn, for example by a tool.
+    [[nodiscard]] std::string model() const;
+    [[nodiscard]] std::string reasoningEffort() const;
+
 private:
     struct ToolExecutionResult {
         CodexToolOutput output;

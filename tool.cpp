@@ -21,6 +21,14 @@ std::expected<std::string, std::string> ToolArguments::string(const std::string_
     return json::string(*value);
 }
 
+std::expected<std::string, std::string> ToolArguments::optionalString(const std::string_view name) const {
+    auto value = json::findJsonMember(json_, name);
+    if (!value) return std::unexpected(value.error());
+    const std::optional<std::string_view>& member = *value;
+    if (!member) return std::string();
+    return json::string(*member);
+}
+
 std::expected<std::size_t, std::string> ToolArguments::size(const std::string_view name) const {
     auto value = json::scalarMember(json_, name);
     if (!value) return std::unexpected(value.error());

@@ -1075,6 +1075,22 @@ bool CodexApi::turnInProgress() const noexcept {
     return turn_running_;
 }
 
+std::optional<std::string> CodexApi::conversationId() const {
+    const std::lock_guard lock(turn_mutex_);
+    if (!conversation_file_) return std::nullopt;
+    return session_id_;
+}
+
+std::string CodexApi::model() const {
+    const std::lock_guard lock(turn_mutex_);
+    return config_.model;
+}
+
+std::string CodexApi::reasoningEffort() const {
+    const std::lock_guard lock(turn_mutex_);
+    return config_.reasoning_effort;
+}
+
 std::expected<std::vector<SavedTurn>, std::string> CodexApi::readHistoryBefore(const std::size_t cursor,
                                                                                const std::size_t maximum_bytes) const {
     const std::lock_guard lock(turn_mutex_);
