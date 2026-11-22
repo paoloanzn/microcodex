@@ -182,9 +182,10 @@ threads can run the same tool at once.
 
 When a reply contains function calls, `CodexApi::executeToolCalls()` runs all
 of them at the same time. It emits `ToolFinished` for each call as soon as
-that call ends, so a slow call does not hold back the calls that finished
-after it. The results it returns, and the outputs the model receives, keep
-the order the model made the calls.
+that call ends, not in the order of the batch. If the first call is slow and
+the second is quick, the second is reported as soon as it is done, without
+waiting for the first. The results it returns, and the outputs the model
+receives, still keep the order the model made the calls.
 
 ```mermaid
 sequenceDiagram
