@@ -1,69 +1,60 @@
 # Tools
 
-A **tool** is a local function the model can call: it sends a
-`function_call` item with a name and JSON arguments, MicroCodex runs the
-function, and the result goes back as a `function_call_output` item. This
-page explains the tool interface in `tool.h` and how `CodexApi` runs calls.
-The six built-in tools are described in
-[built-in tools](../reference/built-in-tools.md). Adding a new one is walked
-through in [adding a tool](../development/adding-a-tool.md).
+A **tool** is a C++ function the model can ask MicroCodex to run. This page
+follows one tool, `glob`, from the model's request to the function and back,
+then explains how `CodexApi` runs calls. The six built-in tools are described
+in [built-in tools](../reference/built-in-tools.md). Writing a new one is
+walked through in [adding a tool](../development/adding-a-tool.md).
 
-## The interface
+## What the model sends
 
-Every tool implements `ToolBase`:
+The model cannot run code. To use a tool, it puts a `function_call` item in
+its reply: the tool's name, and the arguments as a JSON object encoded in a
+string.
 
-```cpp
-class ToolBase {
-public:
-    virtual std::string_view name() const = 0;
-    virtual std::string toJsonString() const = 0;
-    virtual std::expected<ToolResult, std::string> executeJson(std::string_view arguments,
-                                                               std::stop_token stop_token) const = 0;
-    virtual std::optional<std::chrono::seconds> timeout() const { return std::nullopt; }
-};
-
-struct ToolResult {
-    std::string output;                      // sent to the model
-    std::shared_ptr<const EditResult> edit;  // shown in the UI only, may be null
-};
+```json
+{"type":"function_call","call_id":"call_1","name":"glob","arguments":"{\"pattern\":\"docs/development/*.md\"}"}
 ```
 
-- `name()` is the name the model calls. Names must be unique and non-empty;
-  `buildRequestBody()` rejects the request otherwise.
-- `toJsonString()` returns the definition sent in the request's `tools` array:
-  `{"type":"function","name":…,"description":…,"strict":false,"parameters":…}`.
-- `executeJson()` receives the call's arguments exactly as the model sent
-  them (a JSON object encoded in a string) and the call's stop token.
-- `timeout()` is the time limit for one call of the tool. It returns nothing
-  by default, which means the session's limit applies; see
-  [timeouts](#timeouts).
+MicroCodex runs the tool and answers with a `function_call_output` item that
+has the same `call_id` and the result as text:
 
-`ToolResult` keeps what the model sees apart from what the UI shows. The
-`edit` tool returns `"Edited <path>"` to the model and puts the diff in
-`edit`. The diff is never added to the conversation history, so it costs no
-context tokens. `edit` is the only tool that sets this field.
-
-Tools are created once, in `makeCodingTools()`, and shared as
-`std::shared_ptr<const ToolBase>`. They are immutable, so several threads can
-run the same tool at once.
-
-## The `Tool<>` adapter
-
-Most tools are a plain function plus some JSON handling. The `Tool<T, S...>`
-template in `tool.h` wraps a function pointer of type `T (*)(S...)` with
-everything else `ToolBase` needs:
-
-```cpp
-Tool(std::string name, std::string description, T (*callable)(S...),
-     std::string parameters,          // JSON Schema for the arguments
-     JsonExecutionAdapter adapter,    // decodes arguments, calls callable, encodes the result
-     std::optional<std::chrono::seconds> timeout = std::nullopt);  // returned by timeout()
+```json
+{"type":"function_call_output","call_id":"call_1","output":"docs/development/adding-a-tool.md\ndocs/development/ci-and-releases.md"}
 ```
 
-The **adapter** connects JSON to C++. It reads the arguments with
-`ToolArguments`, checks the stop token, calls the function and turns its
-return value into a `ToolResult`. This is the adapter for `glob`, from
-`agent.cpp`:
+The function that does the work knows nothing about either item. It is
+ordinary C++, declared in `glob.h`:
+
+```cpp
+std::expected<std::string, std::string> glob(const std::string& pattern);
+```
+
+Everything in `tool.h` exists to connect the two sides: to turn a name and a
+JSON string into a call of this function, and its return value back into
+text.
+
+## A tool is three pieces
+
+`makeCodingTools()` in `agent.cpp` builds the `glob` tool in one statement:
+
+```cpp
+tools.emplace_back(std::make_shared<GlobTool>(
+    "glob", "Expand a filesystem glob pattern and return matching paths separated by newlines.", glob,
+    R"({"type":"object","properties":{"pattern":{"type":"string"}},"required":["pattern"],"additionalProperties":false})",
+    executeGlob));
+```
+
+The statement puts together three pieces:
+
+| Piece | In the statement | What it does |
+|---|---|---|
+| **Function** | `glob` | The work. It takes typed parameters and knows nothing about JSON. |
+| **Adapter** | `executeGlob` | The translator. It reads `pattern` out of the JSON arguments, calls `glob`, and turns what it returns into the output text. |
+| **Definition** | the name, the description and the JSON Schema of the arguments | What the model is told about the tool. It is sent with every request, so the model knows the tool exists and how to call it. |
+
+The adapter is the piece that connects the function to the model. This is
+all of it:
 
 ```cpp
 std::expected<microcodex::ToolResult, std::string> executeGlob(
@@ -82,16 +73,110 @@ std::expected<microcodex::ToolResult, std::string> executeGlob(
 }
 ```
 
-`ToolArguments` reads top-level members of a flat object: `string(name)`,
-`optionalString(name)`, which is empty when the member is absent,
-`size(name)` for non-negative integers, `boolean(name)`, and
-`boolean(name, default)` for an optional flag. A missing or mistyped member
-is an error with a message the model can act on, such as
-`Missing JSON member 'path'` or
-`JSON member 'offset' is not a non-negative integer`.
+Every built-in adapter takes the same four steps: read the arguments, give up
+if the call was stopped, call the function, and wrap its result. Any step can
+fail with a message, and the model receives it as `Error: ` followed by the
+message, such as `Error: No files matched pattern`.
 
-`Tool::executeJson()` also checks the stop token before and after calling the
-adapter, so a tool that was stopped never reports success.
+`GlobTool` is the type that holds the three pieces:
+
+```cpp
+using GlobTool = microcodex::Tool<std::expected<std::string, std::string>, const std::string&>;
+```
+
+The template arguments of `Tool<>` are the function's return type and
+parameter types, copied from its declaration.
+
+## What `CodexApi` sees
+
+`CodexApi` keeps every tool in one list. But each `Tool<>` is a different
+C++ type, because each wraps a function with a different signature: the
+`Tool<>` for `glob` and the `Tool<>` for `read` cannot go in the same
+`std::vector`. So every `Tool<>` derives from one base class, `ToolBase`, and
+the list holds `std::shared_ptr<const ToolBase>`.
+
+`ToolBase` describes a tool from the outside: something with a name, a
+definition, and a way to run a call given as JSON. `CodexApi` uses these four
+members and nothing else:
+
+| `CodexApi` needs to | `ToolBase` member | `Tool<>` answers with |
+|---|---|---|
+| find the tool a call names | `name()` | the name |
+| tell the model about the tool | `toJsonString()` | the definition, as `{"type":"function","name":…,"description":…,"strict":false,"parameters":…}` |
+| run a call | `executeJson(arguments, stop_token)` | the adapter, given the function |
+| know how long a call may run | `timeout()` | an optional limit, the constructor's last argument (see [timeouts](#timeouts)) |
+
+The function, its parameter types and the adapter stay inside `Tool<>`.
+`CodexApi` never sees them, so adding a tool never changes `CodexApi`.
+
+Put together, the `glob` call from the start of this page runs like this:
+
+1. `CodexApi` finds the tool whose `name()` is `glob`.
+2. It calls `executeJson()` with the string
+   `{"pattern":"docs/development/*.md"}`, on a thread of its own.
+3. `Tool<>` passes the function and the arguments to `executeGlob`.
+4. `executeGlob` reads `pattern` and calls
+   `glob("docs/development/*.md")`.
+5. The two paths come back as a `ToolResult`, and `CodexApi` sends its
+   `output` to the model as the `function_call_output`.
+
+## Details
+
+### Reading arguments
+
+`ToolArguments` reads the members of the arguments object by name. Each
+method returns the value, or a message the model can act on:
+
+| Method | Returns | Member missing | Wrong type |
+|---|---|---|---|
+| `string(name)` | `std::string`, with JSON escapes decoded | `Missing JSON member 'NAME'` | `Expected a JSON string` |
+| `optionalString(name)` | `std::string` | an empty string | `Expected a JSON string` |
+| `size(name)` | `std::size_t` | `Missing JSON member 'NAME'` | `JSON member 'NAME' is not a non-negative integer` |
+| `boolean(name)` | `bool` | `Missing JSON member 'NAME'` | `JSON member 'NAME' is not a boolean` |
+| `boolean(name, default)` | `bool` | `default` | `JSON member 'NAME' is not a boolean` |
+
+These checks matter because the definition sets `"strict":false`: the model
+is not forced to follow the JSON Schema, so the adapter is what catches a
+missing or mistyped argument. Only strings, integers and booleans can be
+read, so a tool's arguments should be a flat object of those.
+
+### What the model sees and what the UI shows
+
+`executeJson()` returns a `ToolResult`:
+
+```cpp
+struct ToolResult {
+    std::string output;                      // sent to the model
+    std::shared_ptr<const EditResult> edit;  // shown in the UI only, may be null
+};
+```
+
+The `edit` tool returns `"Edited <path>"` to the model and puts the diff in
+`edit`. The diff is never added to the conversation history, so it costs no
+context tokens. `edit` is the only tool that sets this field.
+
+### Checks `Tool<>` adds
+
+`Tool::executeJson()` checks the stop token before it calls the adapter and
+again after, so a call that was stopped never reports success. It also
+refuses to run without an adapter, with
+`Tool 'NAME' has no JSON execution adapter`. The adapter is an optional
+constructor argument, so a tool built without one is still offered to the
+model, but every call of it fails.
+
+### Limits of the function
+
+The function is stored as a plain function pointer, `T (*)(S...)`. Two things
+follow from that:
+
+- **An overloaded function needs a cast** to pick one overload. `bash` has
+  two, so `makeCodingTools()` casts it to the one that takes a stop token.
+- **It cannot carry state.** A pointer to a function captures nothing, so a
+  tool that needs data beyond its arguments has to reach it some other way;
+  see [tools that need session state](../development/adding-a-tool.md#tools-that-need-session-state).
+
+Tools are created once, in `makeCodingTools()`, and never change, so several
+threads can run the same tool at once.
 
 ## Running calls
 
