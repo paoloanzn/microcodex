@@ -292,16 +292,22 @@ int runLogout() {
 // Turns SIGINT and SIGTERM during a headless turn into CodexApi::interrupt(),
 // so the turn stops its tools and their commands before MicroCodex exits,
 // instead of leaving them running. This is also how a parent agent stops a
-// sub-agent. A second signal exits at once. A signal ignored on entry, as in
-// a background job, is discarded by the kernel and stays ignored.
+// sub-agent. A second signal exits at once. A signal ignored on entry, as
+// SIGINT is in a background job, stays ignored.
 class HeadlessInterrupts {
 public:
     // Must run before any other thread starts, so every thread blocks the
     // signals and only the watcher receives them.
     explicit HeadlessInterrupts(microcodex::CodexApi& agent) {
         sigemptyset(&signals_);
-        sigaddset(&signals_, SIGINT);
-        sigaddset(&signals_, SIGTERM);
+        for (const int signal_number : {SIGINT, SIGTERM}) {
+            struct sigaction action {};
+            if (sigaction(signal_number, nullptr, &action) == 0 && action.sa_handler != SIG_IGN) {
+                sigaddset(&signals_, signal_number);
+                wake_signal_ = signal_number;
+            }
+        }
+        if (wake_signal_ == 0) return;
         pthread_sigmask(SIG_BLOCK, &signals_, nullptr);
         watcher_ = std::thread([this, &agent] {
             for (bool interrupted = false;; interrupted = true) {
@@ -314,8 +320,11 @@ public:
     }
 
     ~HeadlessInterrupts() {
+        if (!watcher_.joinable()) return;
         done_ = true;
-        pthread_kill(watcher_.native_handle(), SIGINT);  // wakes sigwait(), which then sees done_
+        // Wakes sigwait(), which then sees done_. It must be a signal the
+        // watcher waits for: macOS discards an ignored one even when blocked.
+        pthread_kill(watcher_.native_handle(), wake_signal_);
         watcher_.join();
         pthread_sigmask(SIG_UNBLOCK, &signals_, nullptr);
     }
@@ -327,6 +336,7 @@ public:
 
 private:
     sigset_t signals_{};
+    int wake_signal_ = 0;
     std::atomic<bool> done_{false};
     std::thread watcher_;
 };
