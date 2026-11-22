@@ -49,6 +49,11 @@ replayed when the user sends `continue`.
 Conversation scenarios also cover durable JSONL turns, listing and walking
 saved history, exact replay after resume, compaction checkpoints, and the
 invariant that compaction never removes the durable transcript.
+Sub-agent scenarios run the real `agent` tool: the mock server answers the
+parent and the MicroCodex process it starts in turn, through a first task and
+a follow-up that resumes the sub-agent. Another case sends `SIGTERM` to a
+headless parent while its sub-agent runs a command, and checks that the
+command is gone when the parent exits.
 
 The production endpoint is unchanged by default. The runner sets
 `MICROCODEX_API_ENDPOINT` only for child processes that use fake credentials.

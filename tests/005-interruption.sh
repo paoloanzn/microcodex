@@ -60,3 +60,45 @@ expect_process "T5.6: the tool round limited turn is persisted" 0 \
     grep -q 'call_round_128' "$tool_limit_home"/conversations/*.jsonl <<'STDOUT' 3<<'STDERR'
 STDOUT
 STDERR
+
+agent_interrupt_home=$TEST_WORKDIR/agent-interrupt-home
+write_test_credentials "$agent_interrupt_home" || exit 1
+rm -f "$TEST_PROJECT/command.pid"
+# The sub-agent's command writes command.pid in the working directory.
+# shellcheck disable=SC2034 # run.sh runs each case from case_cwd.
+case_cwd=$TEST_PROJECT
+
+# SIGTERM reaches a headless MicroCodex while its sub-agent runs a long
+# command. The interruption has to travel down to that command: when the
+# parent exits, the command must be gone too. SIGTERM, because a background
+# job ignores SIGINT.
+# shellcheck disable=SC2016 # The inner sh -c expands its own arguments.
+expect_process "T5.7: interrupting a parent stops its sub-agent and the sub-agent's command" 1 \
+    run_with_mock sub-agent-interrupt sh -c '
+        CODEX_HOME="$1" PATH="$2:$PATH" microcodex Delegate a long command 2>"$1/parent.err" &
+        app=$!
+        attempt=0
+        while [ ! -s command.pid ]; do
+            attempt=$((attempt + 1))
+            if [ "$attempt" -ge 500 ]; then
+                kill "$app"
+                exit 96
+            fi
+            sleep 0.01
+        done
+        kill -TERM "$app"
+        wait "$app"
+        status=$?
+        if kill -0 "$(cat command.pid)" 2>/dev/null; then
+            kill "$(cat command.pid)"
+            echo "the command outlived MicroCodex" >&2
+            exit 95
+        fi
+        cat "$1/parent.err" >&2
+        exit "$status"' sh "$agent_interrupt_home" "$TEST_BIN_DIR" <<'STDOUT' 3<<'STDERR'
+STDOUT
+
+[tool agent] {"task":"Run a long command"}
+[tool agent failed] Error: Tool execution interrupted
+Agent failed: Codex turn was interrupted
+STDERR
