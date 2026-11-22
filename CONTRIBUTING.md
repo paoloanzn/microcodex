@@ -39,6 +39,7 @@ The executable is written to `build/microcodex`.
    make test               # run the test suite
    make format             # apply .clang-format (CI checks with clang-format 18)
    make lint               # run .clang-tidy with warnings as errors (clang-tidy 19 or newer)
+   make footprint FOOTPRINT_BASE=origin/main  # size and memory budgets, and growth over main
    shellcheck install.sh launcher.sh tests/*.sh
    ```
 

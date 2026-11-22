@@ -182,6 +182,70 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # Fails when the executable or a session's peak memory goes over the budgets
+  # at the top of tests/footprint.sh, or, on a pull request, grows too much
+  # over the base branch. It measures the x86_64 release build environment. The
+  # report goes to the run summary, and footprint-comment.yml posts it on the
+  # pull request.
+  footprint:
+    name: Footprint (size and memory budgets)
+    runs-on: ubuntu-24.04
+    container: debian:12
+    timeout-minutes: 20
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends \
+            build-essential \
+            ca-certificates \
+            curl \
+            git \
+            libcurl4-openssl-dev \
+            libssl-dev \
+            ruby
+
+      # The full history is needed to build the pull request's base commit.
+      - name: Check out source and dependencies
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          submodules: recursive
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The container runs as root, but the checkout belongs to the runner
+      # user, and git refuses worktree commands in a repository owned by
+      # someone else.
+      - name: Allow git to use the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Check footprint
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: make --jobs 3 footprint FOOTPRINT_BASE="$BASE_SHA" FOOTPRINT_REPORT=build/footprint.md
+
+      - name: Add the report to the run summary
+        if: always() && hashFiles('build/footprint.md') != ''
+        run: cat build/footprint.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save the pull request number for the comment
+        if: always() && github.event_name == 'pull_request' && hashFiles('build/footprint.md') != ''
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: printf '%s\n' "$PR_NUMBER" > build/footprint-pr
+
+      - name: Upload the report
+        if: always() && github.event_name == 'pull_request' && hashFiles('build/footprint.md') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: footprint-report
+          path: |
+            build/footprint.md
+            build/footprint-pr
+          if-no-files-found: error
+          retention-days: 7
+
   macos-build-and-test:
     name: Verify ${{ matrix.target }}
     runs-on: ${{ matrix.os }}

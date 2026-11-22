@@ -71,3 +71,13 @@ STDERR
 Use `run_with_mock SCENARIO ...` when the command should talk to the local API
 fixture. Add the scenario to `tests/mock-server.rb`, validate stable request
 properties there, and avoid matching UUIDs or other per-run values.
+
+## Footprint check
+
+`make footprint` checks the size of the executable and the peak memory of a
+session against the budgets at the top of `tests/footprint.sh`. It reuses the
+mock server's scenarios, and `tests/peak-rss.c` measures the memory.
+`make footprint FOOTPRINT_BASE=origin/main` also builds that commit in a
+temporary worktree and fails on too much growth over it. CI runs the check on
+every push and pull request; see
+[footprint budgets](../docs/development/ci-and-releases.md#footprint-budgets).
