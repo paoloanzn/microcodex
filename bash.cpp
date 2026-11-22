@@ -3,6 +3,7 @@
 
 #include "bash.h"
 
+#include <fcntl.h>
 #include <poll.h>    // IWYU pragma: keep
 #include <signal.h>  // NOLINT(modernize-deprecated-headers): POSIX declares kill here.
 #include <stdlib.h>  // NOLINT(modernize-deprecated-headers): POSIX declares mkstemp here.
@@ -28,6 +29,11 @@
 #include <vector>
 
 #include "bash-safety.h"
+
+// glibc declares it in <unistd.h>, macOS in no header. It is the C runtime's
+// own variable, so it cannot be const.
+// NOLINTNEXTLINE(readability-redundant-declaration,cppcoreguidelines-avoid-non-const-global-variables)
+extern char** environ;
 
 namespace {
 
@@ -76,8 +82,10 @@ void createPipes(PipeDescriptors& stdout_pipe, PipeDescriptors& stderr_pipe) {
 }
 
 // Runs in the forked child: redirects output into the pipes and execs the
-// command. Only async-signal-safe calls are allowed here.
-[[noreturn]] void execChild(PipeDescriptors& stdout_pipe, PipeDescriptors& stderr_pipe, std::vector<char*>& argv) {
+// command. Only async-signal-safe calls are allowed here. A program, run by
+// runProgram(), comes with its complete environment.
+[[noreturn]] void execChild(PipeDescriptors& stdout_pipe, PipeDescriptors& stderr_pipe, std::vector<char*>& argv,
+                            char** program_environment) {
     closeDescriptor(stdout_pipe[0]);
     closeDescriptor(stderr_pipe[0]);
 
@@ -89,6 +97,25 @@ void createPipes(PipeDescriptors& stdout_pipe, PipeDescriptors& stderr_pipe) {
     }
     closeDescriptor(stdout_pipe[1]);
     closeDescriptor(stderr_pipe[1]);
+    // The forking thread may block signals (a headless run waits for them
+    // with sigwait()), and the mask survives exec.
+    sigset_t no_signals;
+    sigemptyset(&no_signals);
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): the forked child runs a single thread.
+    sigprocmask(SIG_SETMASK, &no_signals, nullptr);
+    if (program_environment != nullptr) {
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): open(2) is variadic for its mode argument.
+        int null_input = open("/dev/null", O_RDONLY);
+        if (null_input == -1 || dup2(null_input, STDIN_FILENO) == -1) _exit(126);
+        closeDescriptor(null_input);
+        // An ignored SIGINT survives exec, as in a background job; a stop
+        // must still reach the program. Nothing can report a failure here.
+        static_cast<void>(std::signal(SIGINT, SIG_DFL));
+        static_cast<void>(std::signal(SIGTERM, SIG_DFL));
+        // Replacing the pointer is a plain store, so unlike setenv() it is
+        // safe here, and execvp() passes it on.
+        environ = program_environment;
+    }
 
     execvp(argv.front(), argv.data());
 
@@ -113,11 +140,12 @@ struct ChildProcess {
     bool sent_interrupt = false;
     bool sent_kill = false;
     bool timed_out = false;
+    std::chrono::seconds interrupt_grace{1};  // three for a program, which stops its own commands first
     std::chrono::steady_clock::time_point interrupt_time;
 };
 
 // Kills the child at the deadline, interrupts it on stop, and escalates an
-// interrupt that has been ignored for a second.
+// interrupt that has been ignored for its grace period.
 void signalChild(ChildProcess& child, const std::stop_token& stop_token,
                  const std::optional<std::chrono::steady_clock::time_point>& deadline) {
     if (child.exited) return;
@@ -132,7 +160,7 @@ void signalChild(ChildProcess& child, const std::stop_token& stop_token,
         child.interrupt_time = std::chrono::steady_clock::now();
     }
     if (child.sent_interrupt && !child.sent_kill &&
-        std::chrono::steady_clock::now() - child.interrupt_time >= std::chrono::seconds(1)) {
+        std::chrono::steady_clock::now() - child.interrupt_time >= child.interrupt_grace) {
         // SIGINT gives well-behaved commands time to clean up. SIGKILL
         // guarantees that interrupt() cannot wait forever otherwise.
         signalProcess(child.pid, SIGKILL);
@@ -210,7 +238,8 @@ int exitCode(int status) {
 
 microcodex::BashCommandResult runProcess(
     const std::vector<std::string>& arguments, const std::stop_token stop_token,
-    const std::optional<std::chrono::steady_clock::time_point> deadline = std::nullopt) {
+    const std::optional<std::chrono::steady_clock::time_point> deadline = std::nullopt,
+    char** program_environment = nullptr) {
     if (stop_token.stop_requested()) {
         throw std::runtime_error("Command interrupted");
     }
@@ -242,7 +271,7 @@ microcodex::BashCommandResult runProcess(
         throw std::runtime_error(systemError("fork failed", error_number));
     }
     if (pid == 0) {
-        execChild(stdout_pipe, stderr_pipe, argv);
+        execChild(stdout_pipe, stderr_pipe, argv, program_environment);
     }
 
     closeDescriptor(stdout_pipe[1]);
@@ -259,6 +288,7 @@ microcodex::BashCommandResult runProcess(
         .descriptors = {{{.fd = stdout_pipe[0], .events = POLLIN, .revents = 0},
                          {.fd = stderr_pipe[0], .events = POLLIN, .revents = 0}}},
     };
+    if (program_environment != nullptr) child.interrupt_grace = std::chrono::seconds(3);
 
     while (child.open_streams > 0 || !child.exited) {
         signalChild(child, stop_token, deadline);
@@ -404,6 +434,24 @@ std::expected<BashCommandResult, std::string> bash(const std::string& cmd, const
             return std::unexpected("command denied: " + std::string(*reason));
         }
         BashCommandResult result = runProcess(userShellContext(stop_token).command(cmd), stop_token);
+        if (stop_token.stop_requested()) {
+            return std::unexpected("Command interrupted");
+        }
+        return result;
+    } catch (const std::exception& error) {
+        return std::unexpected(error.what());
+    }
+}
+
+std::expected<BashCommandResult, std::string> runProgram(const std::vector<std::string>& arguments,
+                                                         std::string variable, const std::stop_token stop_token) {
+    try {
+        // getenv() returns the first match, so the variable goes first.
+        std::vector<char*> environment{variable.data()};
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic): environ is a null-terminated C array.
+        for (char** entry = environ; *entry != nullptr; ++entry) environment.push_back(*entry);
+        environment.push_back(nullptr);
+        BashCommandResult result = runProcess(arguments, stop_token, std::nullopt, environment.data());
         if (stop_token.stop_requested()) {
             return std::unexpected("Command interrupted");
         }
