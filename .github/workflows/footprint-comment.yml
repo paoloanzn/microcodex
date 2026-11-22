@@ -1,0 +1,72 @@
+# Posts the footprint report from a pull request's CI run as one comment on the
+# pull request, and updates that comment on every later run. It is separate
+# from CI for two reasons: the release workflow calls CI with read-only
+# permissions, and pull requests from forks get a read-only token. A
+# workflow_run workflow always runs from the default branch with this file's
+# permissions, so it does not run until this file is on the default branch.
+name: Footprint report
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  comment:
+    name: Comment on the pull request
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      pull-requests: write
+    steps:
+      # A run that stopped before the footprint job has no report.
+      - name: Download the report
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: footprint-report
+          path: footprint
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      # The artifact may come from a fork, so its contents are untrusted: the
+      # pull request number must belong to a pull request whose head is the
+      # commit CI ran on.
+      - name: Post or update the comment
+        if: steps.download.outcome == 'success'
+        uses: actions/github-script@v9
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- microcodex-footprint-report -->';
+            const number = Number(fs.readFileSync('footprint/footprint-pr', 'utf8').trim());
+            if (!Number.isSafeInteger(number) || number <= 0) {
+              core.setFailed('The report has no valid pull request number.');
+              return;
+            }
+            const { owner, repo } = context.repo;
+            const { data: pull } = await github.rest.pulls.get({ owner, repo, pull_number: number });
+            if (pull.head.sha !== process.env.HEAD_SHA) {
+              core.info(`Pull request #${number} has moved on from ${process.env.HEAD_SHA}; skipping.`);
+              return;
+            }
+            const report = fs.readFileSync('footprint/footprint.md', 'utf8').slice(0, 60000);
+            const body = `${marker}\n${report}`;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: number, per_page: 100,
+            });
+            const previous = comments.find(
+              (comment) => comment.user?.type === 'Bot' && comment.body?.startsWith(marker),
+            );
+            if (previous) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: previous.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number: number, body });
+            }

@@ -121,8 +121,21 @@ clean:
 test:
 	@sh tests/run.sh
 
+# Checks the executable's size and a session's peak memory against the budgets
+# at the top of tests/footprint.sh. FOOTPRINT_BASE=REV also fails on too much
+# growth over REV, and FOOTPRINT_REPORT=FILE saves the Markdown report.
+footprint: $(TARGET) build/peak-rss
+	@sh tests/footprint.sh $(if $(FOOTPRINT_BASE),--base '$(FOOTPRINT_BASE)') \
+		$(if $(FOOTPRINT_REPORT),--report '$(FOOTPRINT_REPORT)')
+
+# Measures peak memory for tests/footprint.sh; see tests/peak-rss.c.
+build/peak-rss: tests/peak-rss.c
+	@mkdir -p $(dir $@)
+	@echo "Compiling $< -> $@"
+	@$(CC) $(CFLAGS) -O2 $< -o $@
+
 FORCE:
 
 -include $(DEPENDENCIES)
 
-.PHONY: all clean test lint format format-check FORCE
+.PHONY: all clean test footprint lint format format-check FORCE

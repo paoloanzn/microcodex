@@ -23,6 +23,7 @@ All jobs run independently:
 | Verify aarch64-unknown-linux-gnu | Debian 12 container on arm64 | The same, on arm64. |
 | Verify aarch64-apple-darwin | macOS 26, Apple Silicon | Installer syntax, build with `WERROR=1`, `make test`, and the release archive. |
 | Verify x86_64-apple-darwin | macOS 26, Intel | The same, on Intel. |
+| Footprint (size and memory budgets) | Debian 12 container on x86_64 | `make footprint`: the executable's size and a session's peak memory against fixed budgets and, on a pull request, against the base branch. See [footprint budgets](#footprint-budgets). |
 
 clang-format is pinned to version 18 because different versions format the
 same code differently. clang-tidy needs version 19 or newer, because older
@@ -41,6 +42,47 @@ build job checks this in two ways:
 
 A change that pulls in a newer symbol fails this step, even if it builds and
 passes the tests.
+
+### Footprint budgets
+
+Being small is MicroCodex's main promise, so CI checks it like a test. The
+Footprint job runs `tests/footprint.sh` through `make footprint`, which
+measures:
+
+- the size of the stripped `build/microcodex`;
+- the peak resident memory of a session, for each scenario listed in the
+  script, against the mock server. Each scenario runs three times and the
+  largest peak counts. `tests/peak-rss.c` measures it: the kernel counts the
+  memory of whatever starts a process in that process's peak, so a Ruby or
+  Python wrapper would add more memory than MicroCodex itself uses.
+
+The job fails when a number is over its budget. On a pull request it also
+builds the base commit and fails when a number grew by more than the allowed
+percentage. A scenario the base commit does not have yet shows `n/a`.
+
+The budgets and the growth limit are three variables at the top of
+`tests/footprint.sh`, the only place they are set:
+
+| Variable | Value | Limits |
+|---|---|---|
+| `max_binary_bytes` | 1048576 (1 MiB) | The stripped executable. |
+| `max_peak_rss_kib` | 16384 (16 MiB) | The peak memory of a session against the mock server. A real session also sets up TLS and uses a few MiB more. |
+| `max_growth_percent` | 5 | The growth of each number over the base commit. Identical builds differ by about 0.5% in peak memory. |
+
+Changing one is a product decision: change it in the pull request that needs
+it, and explain why there. The numbers are measured on x86_64 Linux in the
+Debian 12 container, the environment that builds the release binary.
+
+The job writes its report to the run summary. On a pull request it also
+uploads it as the `footprint-report` artifact, and the **Footprint report**
+workflow (`footprint-comment.yml`) posts it as a comment, updating the same
+comment on every run. That workflow is separate because the release workflow
+calls `ci.yml` with read-only permissions and pull requests from forks get a
+read-only token. It runs after CI completes, from the default branch, and
+only comments when the pull request's head is still the commit CI measured.
+
+Because the release workflow publishes assets only when every CI job passes,
+a release cannot ship a binary over budget.
 
 ### Build artifacts
 
