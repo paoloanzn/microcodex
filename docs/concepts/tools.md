@@ -19,6 +19,7 @@ public:
     virtual std::string toJsonString() const = 0;
     virtual std::expected<ToolResult, std::string> executeJson(std::string_view arguments,
                                                                std::stop_token stop_token) const = 0;
+    virtual std::optional<std::chrono::seconds> timeout() const { return std::nullopt; }
 };
 
 struct ToolResult {
@@ -33,6 +34,9 @@ struct ToolResult {
   `{"type":"function","name":…,"description":…,"strict":false,"parameters":…}`.
 - `executeJson()` receives the call's arguments exactly as the model sent
   them (a JSON object encoded in a string) and the call's stop token.
+- `timeout()` is the time limit for one call of the tool. It returns nothing
+  by default, which means the session's limit applies; see
+  [timeouts](#timeouts).
 
 `ToolResult` keeps what the model sees apart from what the UI shows. The
 `edit` tool returns `"Edited <path>"` to the model and puts the diff in
@@ -52,7 +56,8 @@ everything else `ToolBase` needs:
 ```cpp
 Tool(std::string name, std::string description, T (*callable)(S...),
      std::string parameters,          // JSON Schema for the arguments
-     JsonExecutionAdapter adapter);   // decodes arguments, calls callable, encodes the result
+     JsonExecutionAdapter adapter,    // decodes arguments, calls callable, encodes the result
+     std::optional<std::chrono::seconds> timeout = std::nullopt);  // returned by timeout()
 ```
 
 The **adapter** connects JSON to C++. It reads the arguments with
@@ -90,8 +95,10 @@ adapter, so a tool that was stopped never reports success.
 ## Running calls
 
 When a reply contains function calls, `CodexApi::executeToolCalls()` runs all
-of them at the same time and collects the results in the order the model
-made the calls.
+of them at the same time. It emits `ToolFinished` for each call as soon as
+that call ends, so a slow call does not hold back the calls that finished
+after it. The results it returns, and the outputs the model receives, keep
+the order the model made the calls.
 
 ```mermaid
 sequenceDiagram
@@ -99,15 +106,15 @@ sequenceDiagram
     participant A as task: call 1
     participant B as task: call 2
 
-    Turn->>A: std::async (own stop source, start time)
-    Turn->>B: std::async (own stop source, start time)
-    Turn->>A: wait until start + timeout
-    A-->>Turn: result 1, emit ToolFinished
-    Turn->>B: wait until start + timeout
+    Turn->>A: std::async (own stop source, start time, timeout)
+    Turn->>B: std::async (own stop source, start time, timeout)
+    Note over Turn: sleep until a call finishes<br/>or the next deadline passes
+    A-->>Turn: marks itself finished
+    Turn-->>Turn: emit ToolFinished for call 1
     Note over B: still running at its deadline
     Turn->>B: request_stop()
-    Turn->>B: wait up to 2 s grace period
-    Turn-->>Turn: output "Error: Tool execution timed out after 120 seconds"
+    Note over Turn: sleep until B finishes<br/>or its 2 s grace period ends
+    Turn-->>Turn: emit ToolFinished for call 2:<br/>"Error: Tool execution timed out after 120 seconds"
     Note over B: if still running, the future goes<br/>to a reaper thread and its result is dropped
 ```
 
@@ -116,9 +123,17 @@ Before anything runs, the batch is checked: at most
 `call_id` and a non-empty name. A batch that fails this check fails the turn.
 
 Each call then gets a `ToolTask`: a `std::future` from `std::async`, its own
-`std::stop_source`, and its start time. `ToolStarted` is emitted as each task
-starts. A `std::stop_callback` on the turn's stop token forwards an
-interruption to every task.
+`std::stop_source`, its start time and its timeout. `ToolStarted` is emitted
+as each task starts. A `std::stop_callback` on the turn's stop token forwards
+an interruption to every task.
+
+Each task marks itself finished in a `ToolBatchProgress`, shared with the
+collecting thread, just before it returns. The collector sleeps on that
+object's condition variable until a call finishes or the next deadline
+passes, then reports every call that has finished. `std::future` has no way
+to wait for whichever of several futures is ready first, which is why the
+tasks signal it themselves. The object is shared through a `std::shared_ptr`
+because a task that times out may outlive the batch.
 
 ### What a call returns
 
@@ -149,9 +164,16 @@ for every row of the table except the first.
 
 ### Timeouts
 
-`tool_execution_timeout_seconds` (120 by default, `0` disables it) limits each
-call. The deadline counts from the call's own start, not from the moment the
-collector reaches it. If it counted from the collector, five stuck calls would
+Each call has a time limit. A tool whose `timeout()` returns a value uses that
+value, and `0` means no limit, so only an interruption stops the call. Every
+other tool, and an unknown tool name, uses `tool_execution_timeout_seconds`
+(120 by default, `0` disables it). A tool's own value always wins over the
+session's, so a long-running tool keeps its limit whatever
+`MICROCODEX_TOOL_EXECUTION_TIMEOUT_SECONDS` is set to. None of the built-in
+tools sets its own limit.
+
+The deadline counts from the call's own start, not from the moment the
+collector notices it. If it counted from the collector, five stuck calls would
 take five timeouts in total instead of one.
 
 When a call is past its deadline, every other overdue call in the batch is

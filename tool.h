@@ -3,10 +3,12 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <expected>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -47,6 +49,11 @@ public:
     [[nodiscard]] virtual std::string toJsonString() const = 0;
     [[nodiscard]] virtual std::expected<ToolResult, std::string> executeJson(std::string_view arguments,
                                                                              std::stop_token stop_token) const = 0;
+
+    // The time limit for one call, counted from the call's start. Nothing
+    // means the session's tool_execution_timeout_seconds applies; zero means
+    // no limit, so only an interruption stops the call.
+    [[nodiscard]] virtual std::optional<std::chrono::seconds> timeout() const { return std::nullopt; }
 
 protected:
     // Copies and moves stay with concrete tools, so a ToolBase is never sliced.
@@ -94,16 +101,19 @@ public:
     explicit Tool(
         std::string name, std::string description, T (*callable)(S...),
         std::string parameters = R"({"type":"object","properties":{},"required":[],"additionalProperties":false})",
-        JsonExecutionAdapter adapter = {})
+        JsonExecutionAdapter adapter = {}, std::optional<std::chrono::seconds> timeout = std::nullopt)
         : name_{std::move(name)},
           description_{std::move(description)},
           callable_(callable),
           parameters_{std::move(parameters)},
-          adapter_{std::move(adapter)} {}
+          adapter_{std::move(adapter)},
+          timeout_{timeout} {}
 
     T operator()(S... arguments) const { return callable_(arguments...); }
 
     [[nodiscard]] std::string_view name() const override { return name_; }
+
+    [[nodiscard]] std::optional<std::chrono::seconds> timeout() const override { return timeout_; }
 
     // Parameters must be a JSON Schema object accepted by the Responses API.
     [[nodiscard]] std::string toJsonString() const override {
@@ -132,6 +142,7 @@ private:
     T (*callable_)(S...);
     std::string parameters_;
     JsonExecutionAdapter adapter_;
+    std::optional<std::chrono::seconds> timeout_;
 };
 
 }  // namespace microcodex

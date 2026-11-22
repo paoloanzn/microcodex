@@ -121,3 +121,18 @@ STDOUT
 STDERR
 
 rm -f "$TEST_PROJECT"/fifo-[1-4]
+
+# The first call sleeps, so the second one finishes first and is reported
+# first. The model still receives both outputs in call order.
+expect_process "T3.9: a tool call is reported as soon as it finishes" 0 \
+    run_with_mock tool-finish-order env CODEX_HOME="$tool_home" PATH="$TEST_BIN_DIR:$PATH" \
+        microcodex Run a slow and a fast command <<'STDOUT' 3<<'STDERR'
+Both commands finished
+STDOUT
+
+[tool bash] {"command":"sleep 1; printf slow"}
+
+[tool bash] {"command":"printf fast"}
+[tool bash completed] {"stdout":"fast","stderr":"","exit_code":0}
+[tool bash completed] {"stdout":"slow","stderr":"","exit_code":0}
+STDERR
