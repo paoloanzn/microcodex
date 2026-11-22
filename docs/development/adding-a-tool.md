@@ -1,9 +1,10 @@
 # Adding a tool
 
 This guide adds a tool named `file_size` that returns the size of a file in
-bytes. It covers the full path: the function, the adapter, registration, and
-a black-box test against the mock server. Read [tools](../concepts/tools.md)
-first for the interface this guide uses.
+bytes. Read [tools](../concepts/tools.md) first: a tool is
+[three pieces](../concepts/tools.md#a-tool-is-three-pieces), a function, an
+adapter and a definition, and steps 1 to 3 below write one each. Step 4 tests
+the tool against the mock server.
 
 Every snippet below was built with `make WERROR=1`, and passes `make lint`,
 `make format-check` and its test.
@@ -125,7 +126,8 @@ tools.emplace_back(std::make_shared<FileSizeTool>(
     executeFileSize));
 ```
 
-The three strings are what the model sees, so write them for the model:
+The three strings are the tool's definition. They are what the model sees,
+so write them for the model:
 
 - the **name** it calls (unique, `snake_case` like the others);
 - a **description** of what the tool does and how it fails;
@@ -187,7 +189,7 @@ standard input and expected stderr on file descriptor 3:
 ```sh
 printf 'hello' > "$TEST_PROJECT/five.txt"
 
-expect_process "T3.9: file_size reports the size of a file" 0 \
+expect_process "T3.11: file_size reports the size of a file" 0 \
     run_with_mock tool-file-size env CODEX_HOME="$tool_home" PATH="$TEST_BIN_DIR:$PATH" \
         microcodex How big is five.txt <<'STDOUT' 3<<'STDERR'
 The file has 5 bytes
@@ -203,8 +205,8 @@ Run the file on its own:
 ```text
 $ sh tests/run.sh tests/003-tool-loop.sh
 …
-ok 009 - T3.9: file_size reports the size of a file
-9 tests, 0 failures
+ok 011 - T3.11: file_size reports the size of a file
+11 tests, 0 failures
 ```
 
 The case passes only if the whole loop works: the tool is advertised, the
@@ -225,7 +227,61 @@ make format-check
 Then add the tool to [built-in tools](../reference/built-in-tools.md) with its
 arguments, output and errors.
 
-## Showing custom output in the UI
+## Going further
+
+`file_size` is the simplest kind of tool: one required argument, quick work,
+one value back. Each built-in tool below shows how to handle one way a tool
+can differ from it.
+
+### Optional arguments
+
+Leave the argument out of the schema's `required` list and read it with a
+method that accepts a missing member. `edit` does this for `replace_all`:
+
+```cpp
+auto replace_all = arguments.boolean("replace_all", false);
+```
+
+The `"default":false` in its schema only informs the model; the value used is
+the one in the code. For strings, `optionalString()` returns an empty string
+when the member is missing, as `agent` uses for `agent_id`.
+
+### Long-running work
+
+`file_size`'s adapter checks the stop token once, before the call, because the
+call is quick. A function that can run for a long time takes the stop token
+as its last parameter instead, and watches it while it works. `bash` does
+this:
+
+```cpp
+using BashTool =
+    microcodex::Tool<std::expected<microcodex::BashCommandResult, std::string>, const std::string&, std::stop_token>;
+```
+
+Its adapter passes the token on, with `callable(*command, stop_token)`. When
+the token is stopped, `bash` interrupts the command and returns. A tool that
+needs more time than the session's limit (120 seconds by default) also passes
+its own limit as the constructor's last argument, as `agent` does; see
+[timeouts](../concepts/tools.md#timeouts).
+
+### Structured output
+
+A result with several parts goes back as one JSON object, with its members
+described in the tool's description. `bash` returns `stdout`, `stderr` and
+`exit_code` this way, built with `json::appendString()` from `json.h`, which
+quotes and escapes a string.
+
+### Tools that need session state
+
+A function pointer cannot carry state, and `ToolBase` has no link to the
+session. A tool that needs something from the running session keeps a
+pointer to it at file scope, set once before the first turn. `agent` does
+this so that sub-agents start on the parent's model: `connectAgentTool()` in
+`agent.cpp` stores the `CodexApi`, and `main.cpp` and `ui.cpp` call it right
+after they create one. The pointer is set before any tool runs and never
+changes after, so parallel calls can read it without a lock.
+
+### Custom output in the UI
 
 The UI shows a tool's output as plain text. The `edit` tool is the one
 exception: it also sets `ToolResult::edit`, which the UI draws as a diff. That
