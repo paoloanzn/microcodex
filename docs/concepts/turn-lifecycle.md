@@ -190,7 +190,7 @@ A successful turn with one tool call emits:
 TurnStarted
 TextDelta …            (zero or more)
 ToolStarted            (one per call; text = the arguments JSON)
-ToolFinished           (one per call, in call order; text = the output)
+ToolFinished           (one per call, as each call ends; text = the output)
 TextDelta …
 TurnCompleted          (text = the full answer)
 ```

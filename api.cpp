@@ -8,6 +8,7 @@
 #include <cctype>
 #include <charconv>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <ctime>
 #include <exception>
@@ -589,6 +590,26 @@ std::expected<void, std::string> validateToolCalls(const std::span<const microco
     return {};
 }
 
+// Lets the collector sleep until any call of a batch finishes, so each
+// ToolFinished is emitted as soon as its call ends instead of after every
+// earlier call. Shared with the tasks, because a task that times out may
+// outlive the batch on a reaper thread.
+struct ToolBatchProgress {
+    std::mutex mutex;
+    std::condition_variable changed;
+    // Entry i is set just before task i returns, so its future is ready
+    // moments later.
+    std::vector<bool> finished;
+};
+
+void markToolTaskFinished(ToolBatchProgress& progress, const std::size_t index) {
+    {
+        const std::lock_guard lock(progress.mutex);
+        progress.finished[index] = true;
+    }
+    progress.changed.notify_one();
+}
+
 // One launched tool call. Result is CodexApi's private result type; the
 // helpers below deduce it instead of naming it.
 template <typename Result>
@@ -599,53 +620,103 @@ struct ToolTask {
     // waiting a fresh `timeout` per task would let the turn take up to
     // N x timeout, so each task waits only until its own deadline.
     std::chrono::steady_clock::time_point start_time;
+    // This call's limit: the tool's own, or the session default. Zero
+    // means none.
+    std::chrono::seconds timeout{0};
     // Set when the task is stopped for timing out. Overdue tasks are
     // stopped together and share one grace period, so a batch of stuck
     // tools cannot stack their grace periods either.
     std::chrono::steady_clock::time_point grace_deadline;
+    // Set once its ToolFinished has been emitted.
+    bool reported = false;
 };
 
 // How long a stopped tool gets to observe the stop and exit.
 constexpr std::chrono::seconds tool_stop_grace_period(2);
 
-// The deadline is anchored at the task's launch, not at the moment the
-// caller reaches it: otherwise parallel stuck tools would each consume a
-// full timeout and the turn could take N x timeout. A task already stopped
-// for timing out counts as timed out even if it exited cooperatively, so it
-// is not reported as interrupted.
-template <typename Result>
-bool toolTaskTimedOut(ToolTask<Result>& task, const std::chrono::seconds timeout) {
-    return timeout.count() > 0 && (task.grace_deadline != std::chrono::steady_clock::time_point{} ||
-                                   task.future.wait_until(task.start_time + timeout) == std::future_status::timeout);
+// The tool's own limit, or the session default for tools without one and for
+// unknown tools.
+std::chrono::seconds toolCallTimeout(const std::span<const std::shared_ptr<const microcodex::ToolBase>> tools,
+                                     const std::string_view name, const std::chrono::seconds session_default) {
+    const auto tool = std::ranges::find_if(
+        tools, [name](const auto& candidate) { return candidate != nullptr && candidate->name() == name; });
+    if (tool == tools.end()) return session_default;
+    return (*tool)->timeout().value_or(session_default);
 }
 
-// Asks every overdue, unfinished tool in tasks to stop at once, so they all
-// share one grace period.
 template <typename Result>
-void stopOverdueToolTasks(const std::span<ToolTask<Result>> tasks, const std::chrono::seconds timeout) {
-    const auto now = std::chrono::steady_clock::now();
-    for (ToolTask<Result>& task : tasks) {
-        if (task.start_time + timeout <= now &&
-            task.future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+bool toolTaskStopped(const ToolTask<Result>& task) {
+    return task.grace_deadline != std::chrono::steady_clock::time_point{};
+}
+
+// When the collector must next act without a task finishing: the earliest
+// deadline of a running task, or the end of a stopped task's grace period.
+// Nothing when no unreported task has a limit.
+template <typename Result>
+std::optional<std::chrono::steady_clock::time_point> nextToolTaskDeadline(const std::span<ToolTask<Result>> tasks) {
+    std::optional<std::chrono::steady_clock::time_point> next;
+    for (const ToolTask<Result>& task : tasks) {
+        if (task.reported) continue;
+        std::chrono::steady_clock::time_point deadline;
+        if (toolTaskStopped(task)) {
+            deadline = task.grace_deadline;
+        } else if (task.timeout.count() > 0) {
+            deadline = task.start_time + task.timeout;
+        } else {
+            continue;
+        }
+        if (!next || deadline < *next) next = deadline;
+    }
+    return next;
+}
+
+// Asks every running task past its own deadline to stop at once, so they
+// all share one grace period. The deadline is anchored at the task's launch,
+// not at the moment the collector notices it: otherwise parallel stuck tools
+// would each consume a full timeout and the turn could take N x timeout.
+template <typename Result>
+void stopOverdueToolTasks(const std::span<ToolTask<Result>> tasks, const std::vector<bool>& finished,
+                          const std::chrono::steady_clock::time_point now) {
+    for (std::size_t index = 0; index < tasks.size(); ++index) {
+        ToolTask<Result>& task = tasks[index];
+        if (task.reported || finished[index] || toolTaskStopped(task) || task.timeout.count() == 0) continue;
+        if (task.start_time + task.timeout <= now) {
             task.stop_source.request_stop();
             task.grace_deadline = now + tool_stop_grace_period;
         }
     }
 }
 
-// Gives a cooperative tool its grace period to observe the stop and exit
-// (the bash tool kills its child process on stop). A tool that ignores the
-// stop is left to a detached reaper thread: futures from std::async block
-// in their destructor until the task finishes, so a still-running task must
-// never be destroyed here. Its result is discarded either way.
+// Hands a task that ignored its stop for the whole grace period to a
+// detached reaper thread: futures from std::async block in their destructor
+// until the task finishes, so a still-running task must never be destroyed
+// here. Its result is discarded.
 template <typename Result>
-void releaseTimedOutToolTask(ToolTask<Result>& task) {
-    if (task.future.wait_until(task.grace_deadline) != std::future_status::ready) {
-        std::thread([future = std::move(task.future)] { future.wait(); }).detach();
-    }
+void releaseStuckToolTask(ToolTask<Result>& task) {
+    std::thread([future = std::move(task.future)] { future.wait(); }).detach();
 }
 
-// Reads a task that finished within its timeout, turning a task failure
+// Sleeps until a task finishes that has not been reported yet, or until the
+// next deadline passes, then returns which tasks have finished.
+template <typename Result>
+std::vector<bool> waitForToolTasks(ToolBatchProgress& progress, const std::span<ToolTask<Result>> tasks) {
+    const auto deadline = nextToolTaskDeadline(tasks);
+    std::unique_lock lock(progress.mutex);
+    const auto unreported_finish = [&progress, tasks] {
+        for (std::size_t index = 0; index < tasks.size(); ++index) {
+            if (progress.finished[index] && !tasks[index].reported) return true;
+        }
+        return false;
+    };
+    if (deadline) {
+        progress.changed.wait_until(lock, *deadline, unreported_finish);
+    } else {
+        progress.changed.wait(lock, unreported_finish);
+    }
+    return progress.finished;
+}
+
+// Reads a task that finished before its deadline, turning a task failure
 // into an error result for that call.
 template <typename Result>
 Result finishedToolTaskResult(std::future<Result>& future, const microcodex::CodexToolCall& call) {
@@ -1122,13 +1193,17 @@ std::expected<std::vector<CodexApi::ToolExecutionResult>, std::string> CodexApi:
 
     std::vector<ToolTask<ToolExecutionResult>> tasks;
     tasks.reserve(calls.size());
+    const auto progress = std::make_shared<ToolBatchProgress>();
+    progress->finished.assign(calls.size(), false);
     try {
         // Captured by value: a task that hits the execution timeout keeps
         // running on a reaper thread after this function returns, so it
         // must never touch CodexApi state through `this`.
         const auto tools = config_.tools;
         const std::size_t maximum_output_bytes = config_.maximum_tool_output_bytes;
-        for (const CodexToolCall& call : calls) {
+        const std::chrono::seconds session_timeout(config_.tool_execution_timeout_seconds);
+        for (std::size_t index = 0; index < calls.size(); ++index) {
+            const CodexToolCall& call = calls[index];
             emitEvent({
                 .type = CodexEventType::ToolStarted,
                 .turn_id = std::string(turn_id),
@@ -1139,10 +1214,19 @@ std::expected<std::vector<CodexApi::ToolExecutionResult>, std::string> CodexApi:
             });
             ToolTask<ToolExecutionResult> task;
             const std::stop_token task_token = task.stop_source.get_token();
+            task.timeout = toolCallTimeout(tools, call.name, session_timeout);
             task.start_time = std::chrono::steady_clock::now();
-            task.future = std::async(std::launch::async, [tools, call, task_token, maximum_output_bytes] {
-                return executeToolCall(tools, call, task_token, maximum_output_bytes);
-            });
+            task.future =
+                std::async(std::launch::async, [tools, call, task_token, maximum_output_bytes, progress, index] {
+                    try {
+                        auto result = executeToolCall(tools, call, task_token, maximum_output_bytes);
+                        markToolTaskFinished(*progress, index);
+                        return result;
+                    } catch (...) {
+                        markToolTaskFinished(*progress, index);
+                        throw;
+                    }
+                });
             tasks.push_back(std::move(task));
         }
     } catch (const std::exception& error) {
@@ -1152,7 +1236,7 @@ std::expected<std::vector<CodexApi::ToolExecutionResult>, std::string> CodexApi:
     }
 
     // A cancelled turn stops every in-flight tool, including ones already
-    // past their wait below.
+    // stopped for their timeout.
     auto propagate_stop = [&tasks] {
         for (auto& task : tasks) {
             task.stop_source.request_stop();
@@ -1160,32 +1244,12 @@ std::expected<std::vector<CodexApi::ToolExecutionResult>, std::string> CodexApi:
     };
     const std::stop_callback<decltype(propagate_stop)> stop_propagation(stop_token, std::move(propagate_stop));
 
-    const std::chrono::seconds timeout(config_.tool_execution_timeout_seconds);
-    std::vector<ToolExecutionResult> results;
-    results.reserve(calls.size());
-    for (std::size_t index = 0; index < tasks.size(); ++index) {
-        ToolTask<ToolExecutionResult>& task = tasks[index];
-        ToolExecutionResult result;
-        if (toolTaskTimedOut(task, timeout)) {
-            // Ask every overdue tool to stop at once, then report the
-            // timeout without waiting for it: the turn must never wedge
-            // behind a hung tool call.
-            if (task.grace_deadline == std::chrono::steady_clock::time_point{}) {
-                stopOverdueToolTasks(std::span(tasks).subspan(index), timeout);
-            }
-            result = {.output = {.call_id = calls[index].call_id,
-                                 .output = "Error: Tool execution timed out after " +
-                                           std::to_string(config_.tool_execution_timeout_seconds) + " seconds"},
-                      .edit = {},
-                      .succeeded = false};
-            releaseTimedOutToolTask(task);
-        } else {
-            // All futures have already been launched. Reading them in this
-            // order preserves the model's call order without serializing
-            // their actual execution.
-            result = finishedToolTaskResult(task.future, calls[index]);
-        }
-
+    // ToolFinished is emitted as each call ends, so a slow call does not hide
+    // the calls that finished after it was made. The results are returned in
+    // the order the model made the calls.
+    std::vector<ToolExecutionResult> results(calls.size());
+    std::size_t unreported = tasks.size();
+    const auto report = [&](const std::size_t index, ToolExecutionResult result) {
         emitEvent({
             .type = CodexEventType::ToolFinished,
             .turn_id = std::string(turn_id),
@@ -1195,7 +1259,38 @@ std::expected<std::vector<CodexApi::ToolExecutionResult>, std::string> CodexApi:
             .edit = result.edit,
             .succeeded = result.succeeded,
         });
-        results.push_back(std::move(result));
+        results[index] = std::move(result);
+        tasks[index].reported = true;
+        --unreported;
+    };
+    const auto timed_out = [&calls, &tasks](const std::size_t index) {
+        return ToolExecutionResult{.output = {.call_id = calls[index].call_id,
+                                              .output = "Error: Tool execution timed out after " +
+                                                        std::to_string(tasks[index].timeout.count()) + " seconds"},
+                                   .edit = {},
+                                   .succeeded = false};
+    };
+
+    while (unreported > 0) {
+        const std::vector<bool> finished = waitForToolTasks(*progress, std::span(tasks));
+        const auto now = std::chrono::steady_clock::now();
+        for (std::size_t index = 0; index < tasks.size(); ++index) {
+            if (tasks[index].reported || !finished[index]) continue;
+            // A task stopped for its timeout counts as timed out even if it
+            // then exited cooperatively, so it is not reported as
+            // interrupted. Its future is ready moments after it finishes.
+            report(index, toolTaskStopped(tasks[index]) ? timed_out(index)
+                                                        : finishedToolTaskResult(tasks[index].future, calls[index]));
+        }
+        // Report a stuck task once its grace period ends without waiting
+        // for it: the turn must never wedge behind a hung tool call.
+        stopOverdueToolTasks(std::span(tasks), finished, now);
+        for (std::size_t index = 0; index < tasks.size(); ++index) {
+            ToolTask<ToolExecutionResult>& task = tasks[index];
+            if (task.reported || !toolTaskStopped(task) || task.grace_deadline > now) continue;
+            releaseStuckToolTask(task);
+            report(index, timed_out(index));
+        }
     }
     return results;
 }

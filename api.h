@@ -55,6 +55,7 @@ struct CodexApiConfig {
     // When a call exceeds it, the call is reported as a timeout error and
     // its worker is asked to stop, so a stuck tool can never wedge the
     // turn. Zero disables the timeout. Tunable at runtime with MICROCODEX_TOOL_EXECUTION_TIMEOUT_SECONDS.
+    // Applies only to tools whose ToolBase::timeout() returns nothing.
     std::size_t tool_execution_timeout_seconds = 120;
     // Offline fallback matching Codex's 272K unknown-model descriptor. The
     // real values are queried from /models before an online run. Keeping an

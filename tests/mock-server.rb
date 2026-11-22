@@ -282,6 +282,16 @@ def validate_scenario!(scenario, request_number, payload)
       assert(outputs.all? { |item| item["output"] == "Error: Tool execution timed out after 1 seconds" },
              "blocked reads did not time out with the expected error")
     end
+  when "tool-finish-order"
+    validate_coding_tools!(payload)
+    if request_number.zero?
+      assert(input_text(payload) == "Run a slow and a fast command",
+             "finish order scenario did not receive the prompt")
+    else
+      outputs = payload.fetch("input").select { |item| item["type"] == "function_call_output" }
+      assert(outputs.map { |item| item["call_id"] } == %w[call_slow_first call_fast_second],
+             "finish order request did not contain the tool outputs in call order")
+    end
   when "incomplete-output"
     validate_coding_tools!(payload)
     if request_number.zero?
@@ -525,6 +535,20 @@ def timeout_call_response
   )
 end
 
+# The slow call is made first, so its ToolFinished comes second only when
+# results are reported as calls finish.
+def finish_order_calls_response
+  sse(
+    {type: "response.output_item.done",
+     item: {type: "function_call", call_id: "call_slow_first", name: "bash",
+            arguments: JSON.generate(command: "sleep 1; printf slow")}},
+    {type: "response.output_item.done",
+     item: {type: "function_call", call_id: "call_fast_second", name: "bash",
+            arguments: JSON.generate(command: "printf fast")}},
+    completed
+  )
+end
+
 # A read of a FIFO with no writer blocks in open() and never observes its stop
 # token, so these calls exercise the non-cooperative timeout path.
 BLOCKED_READ_CALLS = %w[call_fifo_1 call_fifo_2 call_fifo_3 call_fifo_4].freeze
@@ -602,6 +626,9 @@ def response_for(scenario, request_number)
   when "tool-timeout-batch"
     [200, "OK", "text/event-stream",
      request_number.zero? ? blocked_read_calls_response : message_response("Blocked reads timed out")]
+  when "tool-finish-order"
+    [200, "OK", "text/event-stream",
+     request_number.zero? ? finish_order_calls_response : message_response("Both commands finished")]
   when "incomplete-output"
     body = request_number.zero? ? incomplete_response("Partial limited answer") :
                                   message_response("Continued limited answer")
@@ -717,7 +744,7 @@ expected_requests = if scenario == "context-error-retry"
                       3
                     elsif scenario == "tool-round-limit"
                       TOOL_ROUND_LIMIT + 2
-                    elsif %w[tool-write tool-edit tool-shell-env tool-bash-denied tool-timeout tool-timeout-batch compaction-resume incomplete-output interrupt-output interrupt-tool].include?(scenario)
+                    elsif %w[tool-write tool-edit tool-shell-env tool-bash-denied tool-timeout tool-timeout-batch tool-finish-order compaction-resume incomplete-output interrupt-output interrupt-tool].include?(scenario)
                       2
                     else
                       1

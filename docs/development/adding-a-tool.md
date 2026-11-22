@@ -133,6 +133,11 @@ The three strings are what the model sees, so write them for the model:
   because `ToolArguments` only reads top-level strings, integers and
   booleans.
 
+A sixth, optional argument gives the tool its own time limit, such as
+`std::chrono::minutes(30)`, or `std::chrono::seconds(0)` for none. Leave it
+out to use the session's limit, which is right for most tools. See
+[timeouts](../concepts/tools.md#timeouts).
+
 Every request now includes the new definition, and the model can call it.
 
 ## 4. Add a test
